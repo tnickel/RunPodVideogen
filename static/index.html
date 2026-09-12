@@ -7,277 +7,232 @@
   <link rel="stylesheet" href="/static/css/style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 </head>
 <body>
 
-  <!-- App Header -->
-  <header class="app-header">
-    <div class="brand-section">
-      <div class="logo-badge">
-        <svg viewBox="0 0 24 24">
-          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
-        </svg>
+  <div class="app-layout">
+
+    <!-- Slim Header -->
+    <header class="app-header">
+      <div class="brand-section">
+        <div class="logo-badge">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
+          </svg>
+        </div>
+        <div class="brand-titles">
+          <h1>RunPod VideoGen Studio</h1>
+          <span class="brand-subtitle">Wan2GP Orchestrator • MiniMax H3 (FL2VA 20B PDD)</span>
+        </div>
       </div>
-      <div class="brand-titles">
-        <h1>RunPod VideoGen Studio</h1>
-        <div class="brand-subtitle">Wan2GP Orchestrator • MiniMax H3 Specialist</div>
+
+      <div class="header-meta">
+        <div id="statusPill" class="status-pill OFFLINE">
+          <span class="status-indicator"></span>
+          <span id="statusText">OFFLINE</span>
+        </div>
+        <div class="account-pill" id="accountEmail">analyser2008@googlemail.com</div>
+        <div class="balance-pill">Guthaben: <b>$<span id="displayBalance">18.74</span></b></div>
+        <button class="icon-btn" id="openSettingsBtn" title="Einstellungen öffnen">
+          <svg width="15" height="15" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"></path>
+          </svg>
+          Einstellungen
+        </button>
       </div>
+    </header>
+
+    <!-- Row 1: Mission Control & Kosten-Cockpit -->
+    <div class="dashboard-row top-row">
+
+      <!-- Card 1: Pod-Steuerung & Hardware -->
+      <section class="card compact-card">
+        <div class="card-header-compact">
+          <div class="card-title-compact">
+            <span>🚀</span> <b>Pod-Steuerung</b>
+          </div>
+          <span id="podDetailStatus" class="status-badge-inline">Bereit</span>
+        </div>
+
+        <!-- Action Buttons Grid -->
+        <div class="action-grid-compact">
+          <button id="btnStart" class="btn-action btn-primary">
+            <span>🚀</span> Pod Starten
+          </button>
+          <button id="btnPause" class="btn-action btn-pause" disabled>
+            <span>⏸️</span> GPU Pausieren (Stop)
+          </button>
+          <button id="btnOpenWebUI" class="btn-action btn-glow-webui" disabled>
+            <span>🌐</span> Wan2GP WebUI öffnen
+          </button>
+          <div class="sub-actions">
+            <button id="btnRefresh" class="icon-btn-compact" title="Status aktualisieren">
+              <span>🔄</span> Status
+            </button>
+            <button id="btnTerminate" class="btn-danger-compact" disabled title="Löscht Pod und 30GB Modelle">
+              <span>🗑️</span> Löschen (0€)
+            </button>
+          </div>
+        </div>
+
+        <!-- Inline Hardware & Setting Controls -->
+        <div class="controls-row-compact">
+          <div class="control-col">
+            <label class="compact-label">Grafikkarte (GPU):</label>
+            <select id="gpuSelect" class="form-select-compact">
+              <option value="NVIDIA GeForce RTX 4090">RTX 4090 (24 GB) • ~$0.34/h</option>
+              <option value="NVIDIA A40">A40 (48 GB) • ~$0.35/h</option>
+              <option value="NVIDIA GeForce RTX 3090">RTX 3090 (24 GB) • ~$0.22/h</option>
+              <option value="NVIDIA A100-SXM4-80GB">A100 (80 GB) • ~$1.39/h</option>
+            </select>
+          </div>
+
+          <div class="control-col">
+            <label class="compact-label">Cloud-Typ:</label>
+            <select id="cloudTypeSelect" class="form-select-compact">
+              <option value="ALL">Automatisch (Günstigste)</option>
+              <option value="COMMUNITY">Community Cloud</option>
+              <option value="SECURE">Secure Cloud</option>
+            </select>
+          </div>
+
+          <div class="control-col" style="max-width: 140px;">
+            <label class="compact-label">Auto-Shutdown:</label>
+            <select id="autoShutdownSelect" class="form-select-compact">
+              <option value="15">15 Min</option>
+              <option value="30" selected>30 Min</option>
+              <option value="60">60 Min</option>
+              <option value="0">Aus</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Connection Bar -->
+        <div class="conn-bar" id="podDetailsBox" style="display: none;">
+          <span id="podConnectionText" class="conn-text">IP: - | SSH: -</span>
+          <a id="podProxyLink" href="#" target="_blank" class="conn-link">Direct Proxy ↗</a>
+        </div>
+
+        <!-- Hidden inputs to preserve logic -->
+        <div style="display:none;">
+          <span id="volumeDiskDisplay">75</span>
+          <button id="modeStopBtn" class="active" data-mode="stop"></button>
+          <button id="modeTermBtn" data-mode="terminate"></button>
+          <span id="hourlyRateDisplay">$0.34 /h</span>
+        </div>
+      </section>
+
+      <!-- Card 2: Ampelsystem & Kosten-Cockpit -->
+      <section class="card compact-card cost-cockpit-card state-green">
+        <div class="card-header-compact">
+          <div class="card-title-compact">
+            <span>🚦</span> <b>Kosten-Cockpit & Ampelsystem</b>
+          </div>
+          <div class="safety-pill">
+            🛡️ <b>Löschschutz:</b> Modelle bleiben beim Stoppen erhalten
+          </div>
+        </div>
+
+        <div class="cockpit-content-compact">
+          
+          <!-- Left: Traffic Light & Status Tag -->
+          <div class="cockpit-left">
+            <div class="ampel-housing-compact">
+              <div id="ampelRed" class="ampel-lamp red" title="GPU Aktiv"></div>
+              <div id="ampelYellow" class="ampel-lamp yellow" title="Standby (GPU aus)"></div>
+              <div id="ampelGreen" class="ampel-lamp green active" title="0,- € Modus"></div>
+            </div>
+
+            <div class="cockpit-status-meta">
+              <div class="ampel-status-tag green" id="ampelStatusTag">🟢 0,- € NULL-KOSTEN MODUS</div>
+              <div class="ampel-headline" id="ampelHeadline">Keine laufenden Kosten</div>
+              <div class="ampel-desc" id="ampelDesc">
+                Es ist aktuell kein Pod aktiv und kein Cloud-Speicher reserviert. Dein Guthaben bleibt unangetastet.
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Dicke Statusanzeige & Matrix -->
+          <div class="cockpit-right">
+            <div class="rate-box-compact">
+              <div class="rate-header-line">
+                <span class="rate-caption">AKTUELLE KOSTEN-RATE</span>
+                <span class="session-timer-badge">Session: <span id="sessionTimer">00:00:00</span> (<span id="sessionCostDisplay">$0.0000</span>)</span>
+              </div>
+              <div class="main-rate-compact" id="cockpitHourlyRate">$0.000 <span class="rate-unit">/ Std.</span></div>
+            </div>
+
+            <div class="projection-grid-compact">
+              <div class="p-chip">
+                <span class="p-chip-label">PRO TAG (24H)</span>
+                <span class="p-chip-val" id="cockpitDailyRate">$0.00</span>
+              </div>
+              <div class="p-chip">
+                <span class="p-chip-label">PRO WOCHE (7T)</span>
+                <span class="p-chip-val" id="cockpitWeeklyRate">$0.00</span>
+              </div>
+              <div class="p-chip">
+                <span class="p-chip-label">PLATTE / MONAT</span>
+                <span class="p-chip-val" id="cockpitDiskMonthly">$0.00</span>
+              </div>
+              <div class="p-chip highlight">
+                <span class="p-chip-label">REICHWEITE</span>
+                <span class="p-chip-val" id="cockpitRunTimeRemaining">~55h GPU</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
     </div>
 
-    <div class="header-meta">
-      <div id="statusPill" class="status-pill OFFLINE">
-        <span class="status-indicator"></span>
-        <span id="statusText">OFFLINE</span>
-      </div>
-      <div class="account-pill" id="accountEmail">Lade Account...</div>
-      <button class="icon-btn" id="openSettingsBtn">
-        <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"></path>
-        </svg>
-        Einstellungen
-      </button>
+    <!-- Row 2: Video-Galerie (Links) & Live-Konsole (Rechts) -->
+    <div class="dashboard-row bottom-row">
+
+      <!-- Gallery Card -->
+      <section class="card compact-card gallery-col">
+        <div class="card-header-compact">
+          <div class="card-title-compact">
+            <span>🎞️</span> <b>Lokale Video-Galerie</b>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <button id="btnSyncNow" class="icon-btn-compact">
+              <span>🔄</span> Sync
+            </button>
+            <button id="btnOpenFolder" class="icon-btn-compact">
+              <span>📁</span> Im Explorer
+            </button>
+          </div>
+        </div>
+
+        <div id="galleryGrid" class="gallery-grid-compact">
+          <div class="empty-gallery">
+            Noch keine generierten Videos im lokalen outputs/-Ordner.<br>
+            Sobald dein Pod ein Video fertigstellt, wird es automatisch hierher synchronisiert.
+          </div>
+        </div>
+      </section>
+
+      <!-- Terminal Logs Card -->
+      <section class="card compact-card console-col">
+        <div class="card-header-compact">
+          <div class="card-title-compact">
+            <span>💻</span> <b>Live Pod-Protokoll</b>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <button id="btnClearLogs" class="icon-btn-compact" style="font-size: 0.72rem;">Leeren</button>
+            <button id="btnCopyLogs" class="icon-btn-compact" style="font-size: 0.72rem;">Kopieren</button>
+          </div>
+        </div>
+
+        <div id="terminalLog" class="terminal-box-compact">Verbinde mit Live-Log Stream...</div>
+      </section>
+
     </div>
-  </header>
 
-  <!-- Main Grid -->
-  <main class="dashboard-grid">
-
-    <!-- Top Hero Card: Ampelsystem & Kosten-Cockpit -->
-    <section class="card cost-cockpit-card">
-      <div class="cost-cockpit-grid">
-        
-        <!-- Left: Ampel & Status -->
-        <div class="ampel-section">
-          <div class="ampel-housing">
-            <div id="ampelRed" class="ampel-lamp red" title="GPU Aktiv (Kosten laufen)"></div>
-            <div id="ampelYellow" class="ampel-lamp yellow" title="Standby (GPU aus, Modelle erhalten)"></div>
-            <div id="ampelGreen" class="ampel-lamp green active" title="0,- € Modus (Aus & Gelöscht)"></div>
-          </div>
-          <div class="ampel-status-info">
-            <div class="ampel-status-tag green" id="ampelStatusTag">🟢 0,- € NULL-KOSTEN MODUS</div>
-            <div class="ampel-headline" id="ampelHeadline">Keine laufenden Kosten</div>
-            <div class="ampel-desc" id="ampelDesc">
-              Es ist aktuell kein Pod aktiv und kein Cloud-Speicher reserviert. Dein Guthaben bleibt unangetastet.
-            </div>
-            <div class="safety-badge">
-              🛡️ <b>Schutz aktiv:</b> Beim Beenden wird der Pod <u>nur pausiert</u> (Stop). Die 30 GB Modelle bleiben erhalten. Löschen nur auf manuelle Anweisung!
-            </div>
-          </div>
-        </div>
-
-        <!-- Right: Dicke Statusanzeige & Hochrechnungen -->
-        <div class="cost-matrix-section">
-          <div class="main-rate-display">
-            <div class="main-rate-label">AKTUELLE KOSTEN-RATE</div>
-            <div class="main-rate-val" id="cockpitHourlyRate">$0.000 <span class="rate-unit">/ Std.</span></div>
-          </div>
-
-          <div class="projection-grid">
-            <div class="proj-box">
-              <div class="proj-label">PRO TAG (24H)</div>
-              <div class="proj-value" id="cockpitDailyRate">$0.00</div>
-            </div>
-            <div class="proj-box">
-              <div class="proj-label">PRO WOCHE (7 TAGE)</div>
-              <div class="proj-value" id="cockpitWeeklyRate">$0.00</div>
-            </div>
-            <div class="proj-box">
-              <div class="proj-label">PLATTE / MONAT</div>
-              <div class="proj-value" id="cockpitDiskMonthly">$0.00</div>
-            </div>
-            <div class="proj-box highlight-balance">
-              <div class="proj-label">GUTHABEN ($<span id="displayBalance">18.74</span>)</div>
-              <div class="proj-value" id="cockpitRunTimeRemaining">~55h GPU</div>
-            </div>
-          </div>
-        </div>
-
-      </div>
-    </section>
-
-    <!-- Card 1: Pod Control & Launchpad -->
-    <section class="card">
-      <div class="card-header">
-        <h2 class="card-title">
-          <span>🚀</span> Cloud Pod Steuerung
-        </h2>
-        <span id="podDetailStatus" class="settings-desc">System bereit</span>
-      </div>
-
-      <!-- Action Buttons -->
-      <div class="action-grid">
-        <button id="btnStart" class="btn-action btn-primary">
-          <span>🚀</span> Pod Starten
-        </button>
-        <button id="btnPause" class="btn-action btn-pause" disabled>
-          <span>⏸️</span> GPU Pausieren (Stop)
-        </button>
-        <button id="btnTerminate" class="btn-action btn-danger" disabled>
-          <span>🗑️</span> Pod Löschen (0€)
-        </button>
-        <button id="btnRefresh" class="btn-action icon-btn">
-          <span>🔄</span> Status prüfen
-        </button>
-        <button id="btnOpenWebUI" class="btn-action btn-glow-webui" disabled>
-          <span>🌐</span> Wan2GP WebUI öffnen
-        </button>
-      </div>
-
-      <!-- Standby Mode Switch -->
-      <div class="settings-row">
-        <div>
-          <span class="settings-label">Ausschalt-Verhalten</span>
-          <span class="settings-desc">Was passiert beim Ausschalten?</span>
-        </div>
-        <div class="segmented-control">
-          <button id="modeStopBtn" class="segmented-btn active" data-mode="stop">
-            ⚡ Schnellstart (~15¢/Tag)
-          </button>
-          <button id="modeTermBtn" class="segmented-btn" data-mode="terminate">
-            💰 0,- € Sparfuchs
-          </button>
-        </div>
-      </div>
-
-      <!-- Pod Connection Details -->
-      <div class="settings-row" id="podDetailsBox" style="display: none;">
-        <div>
-          <span class="settings-label">Pod-Verbindungsdaten</span>
-          <span class="settings-desc" id="podConnectionText">IP: - | SSH: -</span>
-        </div>
-        <a id="podProxyLink" href="#" target="_blank" class="icon-btn" style="text-decoration: none;">
-          Proxy-Link ↗
-        </a>
-      </div>
-    </section>
-
-    <!-- Card 2: Live Cost & Session Tracker -->
-    <section class="card">
-      <div class="card-header">
-        <h2 class="card-title">
-          <span>⏱️</span> Live Kosten & Session-Tracker
-        </h2>
-      </div>
-
-      <div class="metrics-row">
-        <div class="metric-box">
-          <div class="metric-label">Laufzeit (Session)</div>
-          <div class="metric-value" id="sessionTimer">00:00:00</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label">GPU-Stundensatz</div>
-          <div class="metric-value" id="hourlyRateDisplay">$0.34 /h</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label">Kosten (Session)</div>
-          <div class="metric-value highlight-cost" id="sessionCostDisplay">$0.0000</div>
-        </div>
-      </div>
-
-      <!-- Auto-Shutdown Protection -->
-      <div class="settings-row">
-        <div>
-          <span class="settings-label">Kostenfalle-Schutz (Auto-Shutdown)</span>
-          <span class="settings-desc">Schaltet den Pod bei Inaktivität automatisch ab</span>
-        </div>
-        <select id="autoShutdownSelect" class="form-select" style="width: auto;">
-          <option value="15">Nach 15 Minuten</option>
-          <option value="30" selected>Nach 30 Minuten</option>
-          <option value="60">Nach 60 Minuten</option>
-          <option value="120">Nach 2 Stunden</option>
-          <option value="0">Deaktiviert</option>
-        </select>
-      </div>
-
-      <!-- Active Model Info -->
-      <div class="preset-badge">
-        <span>🎬</span> Fokus-Modell: MiniMax H3 FL2VA Pruned 20B (PDD 8-Step)
-      </div>
-      <p class="settings-desc">
-        Wan2GP startet vorkonfiguriert mit CPU-Offloading und optimalen VRAM-Parametern für synchrone Video- & Stereo-Audio-Generierung.
-      </p>
-    </section>
-
-    <!-- Card 3: Hardware & Cloud Konfiguration -->
-    <section class="card">
-      <div class="card-header">
-        <h2 class="card-title">
-          <span>⚙️</span> GPU & Cloud Auswahl
-        </h2>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">Grafikkarte (GPU Typ):</label>
-        <select id="gpuSelect" class="form-select">
-          <option value="NVIDIA GeForce RTX 4090">NVIDIA GeForce RTX 4090 (24 GB) • ~$0.34/h</option>
-          <option value="NVIDIA A40">NVIDIA A40 (48 GB) • ~$0.35/h (Empfohlen für 20B)</option>
-          <option value="NVIDIA GeForce RTX 3090">NVIDIA GeForce RTX 3090 (24 GB) • ~$0.22/h</option>
-          <option value="NVIDIA A100-SXM4-80GB">NVIDIA A100 (80 GB) • ~$1.39/h</option>
-        </select>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">Cloud-Typ:</label>
-        <select id="cloudTypeSelect" class="form-select">
-          <option value="ALL">Automatisch (Günstigste zuerst / Community & Secure)</option>
-          <option value="COMMUNITY">Nur Community Cloud (Sehr günstig)</option>
-          <option value="SECURE">Nur Secure Cloud (Höchste Stabilität)</option>
-        </select>
-      </div>
-
-      <div class="settings-row">
-        <div>
-          <span class="settings-label">Persistente Volume Disk</span>
-          <span class="settings-desc">Gemountet unter /workspace für Wan2GP & Modell-Caches</span>
-        </div>
-        <div style="font-weight: 700; font-size: 1.1rem; color: #a5b4fc;">
-          <span id="volumeDiskDisplay">75</span> GB
-        </div>
-      </div>
-    </section>
-
-    <!-- Card 4: Video-Galerie & Auto-Sync -->
-    <section class="card gallery-container">
-      <div class="card-header">
-        <h2 class="card-title">
-          <span>🎞️</span> Lokale Video-Galerie
-        </h2>
-        <div style="display: flex; gap: 10px;">
-          <button id="btnSyncNow" class="icon-btn">
-            <span>🔄</span> Jetzt synchronisieren
-          </button>
-          <button id="btnOpenFolder" class="icon-btn">
-            <span>📁</span> Im Explorer öffnen
-          </button>
-        </div>
-      </div>
-
-      <div id="galleryGrid" class="gallery-grid">
-        <!-- Injected dynamically by JS -->
-        <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-dim);">
-          Noch keine generierten Videos im lokalen outputs/-Ordner gefunden.<br>
-          Sobald dein Pod ein Video fertigstellt, wird es automatisch hierher übertragen.
-        </div>
-      </div>
-    </section>
-
-    <!-- Card 5: Live Pod Terminal & Cloud Log Stream -->
-    <section class="card console-card">
-      <div class="card-header">
-        <h2 class="card-title">
-          <span>💻</span> Live Pod-Konsole & Protokoll
-        </h2>
-        <div style="display: flex; gap: 8px;">
-          <button id="btnClearLogs" class="icon-btn" style="padding: 4px 8px; font-size: 0.75rem;">Leeren</button>
-          <button id="btnCopyLogs" class="icon-btn" style="padding: 4px 8px; font-size: 0.75rem;">Kopieren</button>
-        </div>
-      </div>
-
-      <div id="terminalLog" class="terminal-box">Verbinde mit Live-Log Stream...</div>
-    </section>
-
-  </main>
+  </div>
 
   <!-- Settings Modal -->
   <div class="modal-backdrop" id="settingsModal">
@@ -298,7 +253,7 @@
       </div>
 
       <div class="form-group">
-        <label class="form-label">Aktuelles RunPod Guthaben ($ USD):</label>
+        <label class="form-label">RunPod Guthaben ($ USD):</label>
         <input type="number" step="0.01" id="cfgBalance" class="form-input" placeholder="18.74">
       </div>
 
