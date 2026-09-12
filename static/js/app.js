@@ -17,6 +17,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const cockpitDiskMonthly = document.getElementById("cockpitDiskMonthly");
   const cockpitRunTimeRemaining = document.getElementById("cockpitRunTimeRemaining");
   const displayBalance = document.getElementById("displayBalance");
+  const btnRefreshBalance = document.getElementById("btnRefreshBalance");
 
   // Workflow Stepper & Guidance Elements
   const step1 = document.getElementById("step1");
@@ -562,6 +563,9 @@ document.addEventListener("DOMContentLoaded", () => {
             <div class="play-overlay">
               <svg width="18" height="18" fill="#fff" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             </div>
+            <button class="video-delete-btn" title="Video löschen" data-filename="${v.filename}">
+              &times;
+            </button>
           </div>
           <div class="video-info">
             <div class="video-title" title="${v.filename}">${v.filename}</div>
@@ -572,8 +576,48 @@ document.addEventListener("DOMContentLoaded", () => {
           </div>
         `;
 
-        card.querySelector(".video-thumb").addEventListener("click", () => {
+        // Click on thumbnail opens video modal (unless delete button clicked)
+        card.querySelector(".video-thumb").addEventListener("click", (e) => {
+          if (e.target.closest(".video-delete-btn")) return;
           openVideoModal(v.url, v.filename, `${v.size_mb} MB • ${dateStr}`);
+        });
+
+        // Delete button
+        const delBtn = card.querySelector(".video-delete-btn");
+        delBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          if (!confirm(`Möchtest du das Video wirklich löschen?\n\n"${v.filename}"`)) return;
+
+          delBtn.disabled = true;
+          delBtn.textContent = "...";
+          try {
+            const delRes = await fetch("/api/videos/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ filename: v.filename })
+            });
+            if (delRes.ok) {
+              card.style.transition = "all 0.3s ease";
+              card.style.opacity = "0";
+              card.style.transform = "scale(0.85)";
+              setTimeout(() => {
+                card.remove();
+                if (galleryGrid.querySelectorAll(".video-card").length === 0) {
+                  fetchVideos();
+                }
+              }, 300);
+            } else {
+              const errData = await delRes.json();
+              alert("Fehler beim Löschen: " + (errData.detail || "Unbekannter Fehler"));
+              delBtn.disabled = false;
+              delBtn.textContent = "×";
+            }
+          } catch (delErr) {
+            alert("Netzwerkfehler beim Löschen: " + delErr);
+            delBtn.disabled = false;
+            delBtn.textContent = "×";
+          }
         });
 
         galleryGrid.appendChild(card);
@@ -652,6 +696,33 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnRefresh.addEventListener("click", fetchStatus);
+
+  if (btnRefreshBalance) {
+    btnRefreshBalance.addEventListener("click", async () => {
+      btnRefreshBalance.classList.add("spinning");
+      try {
+        const res = await fetch("/api/account/refresh");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.account && data.account.balance !== undefined) {
+            currentBalance = parseFloat(data.account.balance);
+            displayBalance.textContent = currentBalance.toFixed(2);
+            if (cfgBalance) cfgBalance.value = currentBalance.toFixed(2);
+            if (currentHourlyRate > 0) {
+              const hours = (currentBalance / currentHourlyRate).toFixed(0);
+              cockpitRunTimeRemaining.textContent = `~${hours}h GPU möglich`;
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Fehler beim Aktualisieren des Guthabens:", err);
+      } finally {
+        setTimeout(() => {
+          btnRefreshBalance.classList.remove("spinning");
+        }, 600);
+      }
+    });
+  }
 
   btnOpenWebUI.addEventListener("click", () => {
     if (activeProxyUrl) {

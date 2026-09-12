@@ -51,7 +51,6 @@ def forward_log_to_ws(entry: str):
 
 orchestrator.add_listener(forward_log_to_ws)
 
-# Models
 class ConfigUpdateModel(BaseModel):
     runpod_api_key: str | None = None
     gpu_type_id: str | None = None
@@ -60,6 +59,9 @@ class ConfigUpdateModel(BaseModel):
     standby_mode: str | None = None
     auto_shutdown_minutes: int | None = None
     auto_sync_videos: bool | None = None
+
+class VideoDeleteModel(BaseModel):
+    filename: str
     account_balance: float | None = None
 
 # Routes
@@ -173,6 +175,44 @@ def open_folder():
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/account/refresh")
+def refresh_account(set_balance: float | None = None):
+    cfg = load_config()
+    client = orchestrator.get_client()
+    state = orchestrator.get_state()
+    
+    email = cfg.get("account_email", "")
+    try:
+        user_info = client.get_myself()
+        if user_info and "email" in user_info:
+            email = user_info["email"]
+            update_config({"account_email": email})
+    except Exception:
+        pass
+
+    if set_balance is not None:
+        update_config({"account_balance": round(set_balance, 2)})
+        balance = round(set_balance, 2)
+    else:
+        base_balance = float(cfg.get("account_balance", 18.74))
+        accumulated = float(state.get("accumulated_cost", 0.0))
+        balance = max(0.0, round(base_balance - accumulated, 2))
+
+    return {
+        "success": True,
+        "account": {
+            "email": email,
+            "balance": balance
+        }
+    }
+
+@app.post("/api/videos/delete")
+def delete_video_endpoint(model: VideoDeleteModel):
+    safe_name = os.path.basename(model.filename)
+    success = orchestrator.delete_video(safe_name)
+    return {"success": success, "filename": safe_name}
+
 
 @app.get("/api/config")
 def get_config_endpoint():

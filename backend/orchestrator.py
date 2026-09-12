@@ -391,3 +391,27 @@ except Exception as e:
             "auto_shutdown_minutes": cfg.get("auto_shutdown_minutes", 30),
             "recent_logs": list(self.log_history)[-50:]
         }
+
+    def delete_video(self, filename: str) -> bool:
+        """Deletes a video file locally and remotely on the pod (if running) to prevent re-sync."""
+        safe_name = os.path.basename(filename)
+        # 1. Delete locally
+        local_path = os.path.join(get_outputs_dir(), safe_name)
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+                self.log(f"Video lokal gelöscht: {safe_name}")
+            except Exception as e:
+                self.log(f"Fehler beim lokalen Löschen von {safe_name}: {e}", level="WARNING")
+
+        # 2. Delete remotely if pod is running
+        if self.pod_ip and self.pod_ssh_port and self.status == "RUNNING":
+            try:
+                ssh = SSHManager(self.pod_ip, self.pod_ssh_port)
+                ssh.exec_command(f"rm -f '/workspace/Wan2GP/outputs/{safe_name}'")
+                self.log(f"Video auch auf dem Pod gelöscht: {safe_name}")
+            except Exception as e:
+                self.log(f"Hinweis: Konnte Video auf Pod nicht löschen: {e}", level="WARNING")
+
+        return True
+
