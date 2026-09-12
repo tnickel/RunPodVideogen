@@ -137,3 +137,34 @@ python3 -c "import sys; sys.path.insert(0, '/workspace/Wan2GP'); import wgp; fro
 # 4. Logs einsehen:
 tail -n 30 /workspace/wan2gp.log
 ```
+
+---
+
+## 5. Speicher-Diagnose: System-RAM vs. GPU VRAM
+
+* **Symptom:**  
+  Im RunPod-Dashboard oder in Monitoring-Tools erscheint die Warnung:  
+  `high memory utilization - 42.98GiB / 46.57GiB` (oder `43.15GiB / 46.57GiB`).
+* **Ursache:**  
+  Dies ist **nicht** der GPU-VRAM (die NVIDIA A40 hat 48 GB dedizierten Grafikspeicher), sondern der **Container System-RAM** (vom Linux cgroup Memory Limit auf ca. 46,57 GiB gedeckelt).
+  - **Wan2GP nutzt MMGP Offloading:** Die unkomprimierten 20-Milliarden-Parameter-Modellgewichte von MiniMax H3 FL2VA liegen im Host-Arbeitsspeicher gepinnt und werden schichtweise in den VRAM geschaufelt.
+  - **Linux Page Cache:** Linux cached geladene Modell-Checkpoints aggressiv im freien RAM.
+* **Erkenntnis:**  
+  Dieses Verhalten ist für 20B Video-Modelle auf RunPod völlig normal und erwünscht. Es liegt kein Memory-Leak vor, solange der Prozess nicht vom Linux OOM-Killer (Out of Memory) beendet wird.
+
+---
+
+## 6. Performance-Benchmarks: Auflösung vs. Berechnungsdauer
+
+Die Pixelmenge skaliert quadratisch und bestimmt direkt die Tensorskalierung in Wan2GP:
+
+| Auflösung | Pixel pro Frame | Pixel-Faktor | Zeit pro Step | Gesamtdauer (8 Steps) | Praxistipp |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **256p** (`448x256`) | 114.688 | 1.0x | ~4.9s | **~39 Sekunden** | Ideal für schnelle Vorab-Tests & Motion-Checks |
+| **480p** (`832x480`) | 399.360 | 3.5x | ~14.5s | **~1.9 Minuten** | **Standard-Empfehlung:** Optimales Verhältnis aus Schärfe & Speed |
+| **720p** (`1280x720`) | 921.600 | 8.0x | ~58s | **~7.7 Minuten** | Hochwertige finale Renderings |
+| **1080p** (`1920x1088`) | 2.088.960 | **18.2x** | ~260s | **~32 Minuten** | Nur für finales Upscaling / High-End Master |
+
+> [!TIP]
+> Beginne immer mit **480p** (`832x480`). Wenn Bewegung und Bildaufbau gefallen, kann das Video gezielt in 720p oder 1080p neu gerechnet werden.
+
