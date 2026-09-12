@@ -51,6 +51,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnRefresh = document.getElementById("btnRefresh");
   const btnOpenWebUI = document.getElementById("btnOpenWebUI");
 
+  const btnCockpitPause = document.getElementById("btnCockpitPause");
+  const btnCockpitResume = document.getElementById("btnCockpitResume");
+  const btnCockpitTerminate = document.getElementById("btnCockpitTerminate");
+
   const modeStopBtn = document.getElementById("modeStopBtn");
   const modeTermBtn = document.getElementById("modeTermBtn");
 
@@ -91,6 +95,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const videoModalMeta = document.getElementById("videoModalMeta");
   const modalVideoPlayer = document.getElementById("modalVideoPlayer");
   const videoDownloadBtn = document.getElementById("videoDownloadBtn");
+  const modalDeleteBtn = document.getElementById("modalDeleteBtn");
+  let currentModalFilename = "";
 
   // Local State
   let currentUptime = 0;
@@ -284,24 +290,36 @@ document.addEventListener("DOMContentLoaded", () => {
         btnPause.disabled = false;
         btnTerminate.disabled = false;
         btnOpenWebUI.disabled = false;
+        if (btnCockpitPause) btnCockpitPause.style.display = "inline-flex";
+        if (btnCockpitResume) btnCockpitResume.style.display = "none";
+        if (btnCockpitTerminate) btnCockpitTerminate.style.display = "inline-flex";
       } else if (data.status === "STARTING" || data.status === "BOOTSTRAPPING") {
         btnStart.disabled = true;
         btnStart.innerHTML = "<span>⏳</span> Startet...";
         btnPause.disabled = true;
         btnTerminate.disabled = false;
         btnOpenWebUI.disabled = true;
+        if (btnCockpitPause) btnCockpitPause.style.display = "none";
+        if (btnCockpitResume) btnCockpitResume.style.display = "none";
+        if (btnCockpitTerminate) btnCockpitTerminate.style.display = "inline-flex";
       } else if (data.status === "STOPPED") {
         btnStart.disabled = false;
         btnStart.innerHTML = "<span>⚡</span> Pod Aufwecken (Resume 45s)";
         btnPause.disabled = true;
         btnTerminate.disabled = false;
         btnOpenWebUI.disabled = true;
+        if (btnCockpitPause) btnCockpitPause.style.display = "none";
+        if (btnCockpitResume) btnCockpitResume.style.display = "inline-flex";
+        if (btnCockpitTerminate) btnCockpitTerminate.style.display = "inline-flex";
       } else { // OFFLINE, TERMINATED, ERROR
         btnStart.disabled = false;
         btnStart.innerHTML = "<span>🚀</span> Pod Starten";
         btnPause.disabled = true;
         btnTerminate.disabled = true;
         btnOpenWebUI.disabled = true;
+        if (btnCockpitPause) btnCockpitPause.style.display = "none";
+        if (btnCockpitResume) btnCockpitResume.style.display = "none";
+        if (btnCockpitTerminate) btnCockpitTerminate.style.display = "none";
       }
 
       // Update Step-by-Step Guidance & Stepper
@@ -582,15 +600,33 @@ document.addEventListener("DOMContentLoaded", () => {
           openVideoModal(v.url, v.filename, `${v.size_mb} MB • ${dateStr}`);
         });
 
-        // Delete button
+        // Delete button with 2-step inline confirmation (no browser popup!)
         const delBtn = card.querySelector(".video-delete-btn");
+        let delTimeout = null;
+
         delBtn.addEventListener("click", async (e) => {
           e.stopPropagation();
           e.preventDefault();
-          if (!confirm(`Möchtest du das Video wirklich löschen?\n\n"${v.filename}"`)) return;
 
+          if (!delBtn.classList.contains("confirming")) {
+            // Step 1: Request confirmation
+            delBtn.classList.add("confirming");
+            delBtn.innerHTML = "<span>Löschen?</span>";
+            delBtn.title = "Klicke noch einmal, um endgültig zu löschen";
+
+            delTimeout = setTimeout(() => {
+              delBtn.classList.remove("confirming");
+              delBtn.innerHTML = "&times;";
+              delBtn.title = "Video löschen";
+            }, 3500);
+            return;
+          }
+
+          // Step 2: User clicked second time -> Execute deletion
+          clearTimeout(delTimeout);
           delBtn.disabled = true;
-          delBtn.textContent = "...";
+          delBtn.innerHTML = '<span class="del-spinner"></span>';
+
           try {
             const delRes = await fetch("/api/videos/delete", {
               method: "POST",
@@ -598,7 +634,7 @@ document.addEventListener("DOMContentLoaded", () => {
               body: JSON.stringify({ filename: v.filename })
             });
             if (delRes.ok) {
-              card.style.transition = "all 0.3s ease";
+              card.style.transition = "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)";
               card.style.opacity = "0";
               card.style.transform = "scale(0.85)";
               setTimeout(() => {
@@ -611,12 +647,12 @@ document.addEventListener("DOMContentLoaded", () => {
               const errData = await delRes.json();
               alert("Fehler beim Löschen: " + (errData.detail || "Unbekannter Fehler"));
               delBtn.disabled = false;
-              delBtn.textContent = "×";
+              delBtn.innerHTML = "&times;";
             }
           } catch (delErr) {
             alert("Netzwerkfehler beim Löschen: " + delErr);
             delBtn.disabled = false;
-            delBtn.textContent = "×";
+            delBtn.innerHTML = "&times;";
           }
         });
 
@@ -628,11 +664,17 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function openVideoModal(url, title, meta) {
+    currentModalFilename = title;
     videoModalTitle.textContent = title;
     videoModalMeta.textContent = meta;
     modalVideoPlayer.src = url;
     videoDownloadBtn.href = url;
     videoDownloadBtn.setAttribute("download", title);
+    if (modalDeleteBtn) {
+      modalDeleteBtn.classList.remove("confirming");
+      modalDeleteBtn.innerHTML = "<span>🗑️ Löschen</span>";
+      modalDeleteBtn.disabled = false;
+    }
     videoModal.classList.add("active");
     modalVideoPlayer.play().catch(() => {});
   }
@@ -641,6 +683,48 @@ document.addEventListener("DOMContentLoaded", () => {
     videoModal.classList.remove("active");
     modalVideoPlayer.pause();
     modalVideoPlayer.src = "";
+    currentModalFilename = "";
+  }
+
+  if (modalDeleteBtn) {
+    let modalDelTimeout = null;
+    modalDeleteBtn.addEventListener("click", async () => {
+      if (!currentModalFilename) return;
+
+      if (!modalDeleteBtn.classList.contains("confirming")) {
+        modalDeleteBtn.classList.add("confirming");
+        modalDeleteBtn.innerHTML = "<span>⚠️ Wirklich löschen?</span>";
+        modalDelTimeout = setTimeout(() => {
+          modalDeleteBtn.classList.remove("confirming");
+          modalDeleteBtn.innerHTML = "<span>🗑️ Löschen</span>";
+        }, 3500);
+        return;
+      }
+
+      clearTimeout(modalDelTimeout);
+      modalDeleteBtn.disabled = true;
+      modalDeleteBtn.innerHTML = "<span>Lösche...</span>";
+
+      try {
+        const res = await fetch("/api/videos/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: currentModalFilename })
+        });
+        if (res.ok) {
+          closeVideoModal();
+          fetchVideos();
+        } else {
+          alert("Fehler beim Löschen des Videos.");
+          modalDeleteBtn.disabled = false;
+          modalDeleteBtn.innerHTML = "<span>🗑️ Löschen</span>";
+        }
+      } catch (err) {
+        alert("Netzwerkfehler: " + err);
+        modalDeleteBtn.disabled = false;
+        modalDeleteBtn.innerHTML = "<span>🗑️ Löschen</span>";
+      }
+    });
   }
 
   closeVideoModalBtn.addEventListener("click", closeVideoModal);
@@ -696,6 +780,17 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnRefresh.addEventListener("click", fetchStatus);
+
+  // Cockpit Action Listeners (delegated to primary buttons)
+  if (btnCockpitPause) {
+    btnCockpitPause.addEventListener("click", () => btnPause.click());
+  }
+  if (btnCockpitResume) {
+    btnCockpitResume.addEventListener("click", () => btnStart.click());
+  }
+  if (btnCockpitTerminate) {
+    btnCockpitTerminate.addEventListener("click", () => btnTerminate.click());
+  }
 
   if (btnRefreshBalance) {
     btnRefreshBalance.addEventListener("click", async () => {

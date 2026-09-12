@@ -208,6 +208,17 @@
               <div class="ampel-desc" id="ampelDesc">
                 Es ist aktuell kein Pod aktiv und kein Cloud-Speicher reserviert. Dein Guthaben bleibt unangetastet.
               </div>
+              <div class="cockpit-actions" id="cockpitActions">
+                <button id="btnCockpitPause" class="btn-action-sm btn-pause" style="display: none;">
+                  <span>⏸️</span> GPU Pausieren (Stop)
+                </button>
+                <button id="btnCockpitResume" class="btn-action-sm btn-primary" style="display: none;">
+                  <span>⚡</span> Pod Aufwecken (Resume 45s)
+                </button>
+                <button id="btnCockpitTerminate" class="btn-danger-sm" style="display: none;" title="Pod und Speicher endgültig löschen für 0,- € Kosten">
+                  <span>🗑️</span> Pod Löschen (0 €)
+                </button>
+              </div>
             </div>
           </div>
 
@@ -334,11 +345,16 @@
         <video id="modalVideoPlayer" controls autoplay loop></video>
       </div>
 
-      <div style="display: flex; justify-content: space-between; align-items: center;">
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px;">
         <span id="videoModalMeta" class="settings-desc"></span>
-        <a id="videoDownloadBtn" href="#" download class="btn-action btn-primary" style="padding: 8px 16px; text-decoration: none;">
-          Herunterladen
-        </a>
+        <div style="display: flex; gap: 10px;">
+          <button id="modalDeleteBtn" class="icon-btn" style="color: #ef4444; border-color: rgba(239, 68, 68, 0.4);">
+            <span>🗑️</span> Löschen
+          </button>
+          <a id="videoDownloadBtn" href="#" download class="btn-action btn-primary" style="padding: 8px 16px; text-decoration: none;">
+            Herunterladen
+          </a>
+        </div>
       </div>
     </div>
   </div>
