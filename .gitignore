@@ -1,7 +1,62 @@
+# ==============================================================================
+# Security & Credentials (STRICT - NO SECRETS OR KEYS ALLOWED)
+# ==============================================================================
 config.json
+*.env
+*.env.*
+*.secret
+*.secrets
+credentials*
+keys/
+.secrets/
+
+# SSH and Certificates
+.ssh/
+*.pem
+*.key
+*.pub
+id_rsa*
+id_ed25519*
+id_ecdsa*
+known_hosts*
+
+# Outputs and Media
 outputs/*
 !outputs/.gitkeep
+
+# Python
 __pycache__/
-*.pyc
-.ssh/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+
+# Logs
+*.log
+wan2gp.log
+
+# System & IDE
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
