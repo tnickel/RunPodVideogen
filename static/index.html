@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RunPod VideoGen Studio</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- App Header -->
+  <header class="app-header">
+    <div class="brand-section">
+      <div class="logo-badge">
+        <svg viewBox="0 0 24 24">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
+        </svg>
+      </div>
+      <div class="brand-titles">
+        <h1>RunPod VideoGen Studio</h1>
+        <div class="brand-subtitle">Wan2GP Orchestrator • MiniMax H3 Specialist</div>
+      </div>
+    </div>
+
+    <div class="header-meta">
+      <div id="statusPill" class="status-pill OFFLINE">
+        <span class="status-indicator"></span>
+        <span id="statusText">OFFLINE</span>
+      </div>
+      <div class="account-pill" id="accountEmail">Lade Account...</div>
+      <button class="icon-btn" id="openSettingsBtn">
+        <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"></path>
+        </svg>
+        Einstellungen
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Grid -->
+  <main class="dashboard-grid">
+
+    <!-- Card 1: Pod Control & Launchpad -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span>🚀</span> Cloud Pod Steuerung
+        </h2>
+        <span id="podDetailStatus" class="settings-desc">System bereit</span>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="action-grid">
+        <button id="btnStart" class="btn-action btn-primary">
+          <span>🚀</span> Pod Starten
+        </button>
+        <button id="btnPause" class="btn-action btn-pause" disabled>
+          <span>⏸️</span> GPU Pausieren
+        </button>
+        <button id="btnTerminate" class="btn-action btn-danger" disabled>
+          <span>🛑</span> Beenden (0€)
+        </button>
+        <button id="btnRefresh" class="btn-action icon-btn">
+          <span>🔄</span> Status prüfen
+        </button>
+        <button id="btnOpenWebUI" class="btn-action btn-glow-webui" disabled>
+          <span>🌐</span> Wan2GP WebUI öffnen
+        </button>
+      </div>
+
+      <!-- Standby Mode Switch -->
+      <div class="settings-row">
+        <div>
+          <span class="settings-label">Ausschalt-Verhalten</span>
+          <span class="settings-desc">Was passiert beim Ausschalten?</span>
+        </div>
+        <div class="segmented-control">
+          <button id="modeStopBtn" class="segmented-btn active" data-mode="stop">
+            ⚡ Schnellstart (~15¢/Tag)
+          </button>
+          <button id="modeTermBtn" class="segmented-btn" data-mode="terminate">
+            💰 0,- € Sparfuchs
+          </button>
+        </div>
+      </div>
+
+      <!-- Pod Connection Details -->
+      <div class="settings-row" id="podDetailsBox" style="display: none;">
+        <div>
+          <span class="settings-label">Pod-Verbindungsdaten</span>
+          <span class="settings-desc" id="podConnectionText">IP: - | SSH: -</span>
+        </div>
+        <a id="podProxyLink" href="#" target="_blank" class="icon-btn" style="text-decoration: none;">
+          Proxy-Link ↗
+        </a>
+      </div>
+    </section>
+
+    <!-- Card 2: Live Cost & Session Tracker -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span>⏱️</span> Live Kosten & Session-Tracker
+        </h2>
+      </div>
+
+      <div class="metrics-row">
+        <div class="metric-box">
+          <div class="metric-label">Laufzeit (Session)</div>
+          <div class="metric-value" id="sessionTimer">00:00:00</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">GPU-Stundensatz</div>
+          <div class="metric-value" id="hourlyRateDisplay">$0.34 /h</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Kosten (Session)</div>
+          <div class="metric-value highlight-cost" id="sessionCostDisplay">$0.0000</div>
+        </div>
+      </div>
+
+      <!-- Auto-Shutdown Protection -->
+      <div class="settings-row">
+        <div>
+          <span class="settings-label">Kostenfalle-Schutz (Auto-Shutdown)</span>
+          <span class="settings-desc">Schaltet den Pod bei Inaktivität automatisch ab</span>
+        </div>
+        <select id="autoShutdownSelect" class="form-select" style="width: auto;">
+          <option value="15">Nach 15 Minuten</option>
+          <option value="30" selected>Nach 30 Minuten</option>
+          <option value="60">Nach 60 Minuten</option>
+          <option value="120">Nach 2 Stunden</option>
+          <option value="0">Deaktiviert</option>
+        </select>
+      </div>
+
+      <!-- Active Model Info -->
+      <div class="preset-badge">
+        <span>🎬</span> Fokus-Modell: MiniMax H3 FL2VA Pruned 20B (PDD 8-Step)
+      </div>
+      <p class="settings-desc">
+        Wan2GP startet vorkonfiguriert mit CPU-Offloading und optimalen VRAM-Parametern für synchrone Video- & Stereo-Audio-Generierung.
+      </p>
+    </section>
+
+    <!-- Card 3: Hardware & Cloud Konfiguration -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span>⚙️</span> GPU & Cloud Auswahl
+        </h2>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Grafikkarte (GPU Typ):</label>
+        <select id="gpuSelect" class="form-select">
+          <option value="NVIDIA GeForce RTX 4090">NVIDIA GeForce RTX 4090 (24 GB) • ~$0.34/h</option>
+          <option value="NVIDIA A40">NVIDIA A40 (48 GB) • ~$0.35/h (Empfohlen für 20B)</option>
+          <option value="NVIDIA GeForce RTX 3090">NVIDIA GeForce RTX 3090 (24 GB) • ~$0.22/h</option>
+          <option value="NVIDIA A100-SXM4-80GB">NVIDIA A100 (80 GB) • ~$1.39/h</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Cloud-Typ:</label>
+        <select id="cloudTypeSelect" class="form-select">
+          <option value="ALL">Automatisch (Günstigste zuerst / Community & Secure)</option>
+          <option value="COMMUNITY">Nur Community Cloud (Sehr günstig)</option>
+          <option value="SECURE">Nur Secure Cloud (Höchste Stabilität)</option>
+        </select>
+      </div>
+
+      <div class="settings-row">
+        <div>
+          <span class="settings-label">Persistente Volume Disk</span>
+          <span class="settings-desc">Gemountet unter /workspace für Wan2GP & Modell-Caches</span>
+        </div>
+        <div style="font-weight: 700; font-size: 1.1rem; color: #a5b4fc;">
+          <span id="volumeDiskDisplay">75</span> GB
+        </div>
+      </div>
+    </section>
+
+    <!-- Card 4: Video-Galerie & Auto-Sync -->
+    <section class="card gallery-container">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span>🎞️</span> Lokale Video-Galerie
+        </h2>
+        <div style="display: flex; gap: 10px;">
+          <button id="btnSyncNow" class="icon-btn">
+            <span>🔄</span> Jetzt synchronisieren
+          </button>
+          <button id="btnOpenFolder" class="icon-btn">
+            <span>📁</span> Im Explorer öffnen
+          </button>
+        </div>
+      </div>
+
+      <div id="galleryGrid" class="gallery-grid">
+        <!-- Injected dynamically by JS -->
+        <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--text-dim);">
+          Noch keine generierten Videos im lokalen outputs/-Ordner gefunden.<br>
+          Sobald dein Pod ein Video fertigstellt, wird es automatisch hierher übertragen.
+        </div>
+      </div>
+    </section>
+
+    <!-- Card 5: Live Pod Terminal & Cloud Log Stream -->
+    <section class="card console-card">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span>💻</span> Live Pod-Konsole & Protokoll
+        </h2>
+        <div style="display: flex; gap: 8px;">
+          <button id="btnClearLogs" class="icon-btn" style="padding: 4px 8px; font-size: 0.75rem;">Leeren</button>
+          <button id="btnCopyLogs" class="icon-btn" style="padding: 4px 8px; font-size: 0.75rem;">Kopieren</button>
+        </div>
+      </div>
+
+      <div id="terminalLog" class="terminal-box">Verbinde mit Live-Log Stream...</div>
+    </section>
+
+  </main>
+
+  <!-- Settings Modal -->
+  <div class="modal-backdrop" id="settingsModal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 class="card-title">Einstellungen</h3>
+        <button class="close-btn" id="closeSettingsBtn">&times;</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">RunPod API Key:</label>
+        <input type="password" id="cfgApiKey" class="form-input" placeholder="rpa_...">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Account E-Mail:</label>
+        <input type="text" id="cfgEmail" class="form-input" readonly>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
+        <button class="icon-btn" id="cancelSettingsBtn">Abbrechen</button>
+        <button class="btn-action btn-primary" id="saveSettingsBtn" style="padding: 8px 16px;">Speichern</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Video Player Modal -->
+  <div class="modal-backdrop" id="videoModal">
+    <div class="modal-dialog video-modal-dialog">
+      <div class="modal-header">
+        <h3 class="card-title" id="videoModalTitle">Video-Vorschau</h3>
+        <button class="close-btn" id="closeVideoModalBtn">&times;</button>
+      </div>
+
+      <div class="video-player-container">
+        <video id="modalVideoPlayer" controls autoplay loop></video>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <span id="videoModalMeta" class="settings-desc"></span>
+        <a id="videoDownloadBtn" href="#" download class="btn-action btn-primary" style="padding: 8px 16px; text-decoration: none;">
+          Herunterladen
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

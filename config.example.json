@@ -1,0 +1,16 @@
+{
+  "runpod_api_key": "YOUR_RUNPOD_API_KEY",
+  "account_email": "your_email@example.com",
+  "active_pod_id": null,
+  "active_pod_status": "OFFLINE",
+  "gpu_type_id": "NVIDIA GeForce RTX 4090",
+  "cloud_type": "ALL",
+  "volume_disk_gb": 75,
+  "container_disk_gb": 30,
+  "standby_mode": "stop",
+  "auto_shutdown_minutes": 30,
+  "server_port": 7880,
+  "model_preset": "MiniMax H3 FL2VA Pruned 20B (PDD 8-Step)",
+  "auto_sync_videos": true,
+  "sync_interval_seconds": 15
+}
