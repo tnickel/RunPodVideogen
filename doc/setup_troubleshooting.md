@@ -56,7 +56,35 @@ Dieses Dokument protokolliert alle technischen Erkenntnisse, Versionskonflikte u
   Günstige Consumer-Karten wie RTX 4090 sind in der Community Cloud oft temporär vergriffen.
 * **Lösung:**  
   * **Empfehlung:** Wechsel auf **NVIDIA A40 (48 GB VRAM)** für ~0,35 $/h (nahezu identischer Preis wie RTX 4090, aber doppelt so viel VRAM – ideal für 20B Modelle).
-  * **Interaktives Error-Handling:** Das Frontend bietet bei Nicht-Verfügbarkeit direkte 1-Klick-Buttons, um sofort auf A40 oder Secure Cloud zu wechseln.
+### Problem 5: `module 'torch.nn' has no attribute 'Buffer'` (z. B. bei MiniMax H3 / mmaudio)
+* **Symptom:**  
+  In der WanGP WebUI erscheint beim Auswählen des Profils *MiniMax H3* oder beim Laden von Audio-Synthese-Modulen (`mmaudio`) eine rote Fehlermeldung:
+  ```text
+  Error
+  module 'torch.nn' has no attribute 'Buffer'
+  ```
+* **Ursache:**  
+  `torch.nn.Buffer` wurde erst in **PyTorch 2.5** eingeführt. Das Standard-RunPod Container-Image verwendet **PyTorch 2.4.1**. Neuere Repositories und Audio-Pipelines nutzen `nn.Buffer(..., persistent=...)` für Parameterdeklarationen.
+* **Lösung:**  
+  Transparentes Polyfill am Anfang von `/workspace/Wan2GP/wgp.py` und im Bootstrap-Skript:
+  ```python
+  if not hasattr(nn, "Buffer"):
+      class _Buffer(torch.Tensor):
+          def __new__(cls, data=None, *, persistent=True):
+              if data is None: data = torch.empty(0)
+              t = data.detach().as_subclass(cls) if isinstance(data, torch.Tensor) else torch.tensor(data).as_subclass(cls)
+              t.persistent = persistent
+              return t
+      nn.Buffer = _Buffer
+      _orig_module_setattr = nn.Module.__setattr__
+      def _compatible_module_setattr(self, name, value):
+          if isinstance(value, _Buffer):
+              self.register_buffer(name, value, persistent=getattr(value, "persistent", True))
+          else:
+              _orig_module_setattr(self, name, value)
+      nn.Module.__setattr__ = _compatible_module_setattr
+  ```
+  Damit verhält sich PyTorch 2.4 exakt wie PyTorch 2.5 und alle abhängigen Bibliotheken wie `mmaudio` laden fehlerfrei.
 
 ---
 

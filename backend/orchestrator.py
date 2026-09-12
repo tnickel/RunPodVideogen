@@ -281,6 +281,40 @@ jit = _compatible_jit
         f.write('\\n' + wrapper + '\\n')
 " 2>/dev/null || true
 
+        # PyTorch Compatibility Patch for RunPod PyTorch < 2.5:
+        # Wan2GP / mmaudio uses torch.nn.Buffer which was introduced in PyTorch 2.5
+        python3 -c "
+wgp_path = '/workspace/Wan2GP/wgp.py'
+try:
+    with open(wgp_path, 'r') as f:
+        c = f.read()
+    if 'class _Buffer' not in c:
+        polyfill = '''# --- Compatibility Polyfill for torch.nn.Buffer (PyTorch < 2.5) ---
+import torch
+import torch.nn as nn
+if not hasattr(nn, \\\"Buffer\\\"):
+    class _Buffer(torch.Tensor):
+        def __new__(cls, data=None, *, persistent=True):
+            if data is None: data = torch.empty(0)
+            t = data.detach().as_subclass(cls) if isinstance(data, torch.Tensor) else torch.tensor(data).as_subclass(cls)
+            t.persistent = persistent
+            return t
+    nn.Buffer = _Buffer
+    _orig_module_setattr = nn.Module.__setattr__
+    def _compatible_module_setattr(self, name, value):
+        if isinstance(value, _Buffer):
+            self.register_buffer(name, value, persistent=getattr(value, \\\"persistent\\\", True))
+        else:
+            _orig_module_setattr(self, name, value)
+    nn.Module.__setattr__ = _compatible_module_setattr
+# ------------------------------------------------------------------
+'''
+        with open(wgp_path, 'w') as f:
+            f.write(polyfill + '\\n' + c)
+except Exception as e:
+    print('Polyfill injection note:', e)
+" 2>/dev/null || true
+
         mkdir -p /workspace/Wan2GP/outputs
         mkdir -p /workspace/Wan2GP/ckpts
 
@@ -290,7 +324,7 @@ jit = _compatible_jit
         else
             echo "[BOOTSTRAP] Starte Wan2GP WebUI auf Port 7860..."
             cd /workspace/Wan2GP
-            nohup python wgp.py --server-port 7860 --server-name 0.0.0.0 </dev/null > /workspace/wan2gp.log 2>&1 &
+            setsid python wgp.py --server-port 7860 --server-name 0.0.0.0 </dev/null > /workspace/wan2gp.log 2>&1 &
             sleep 4
         fi
         """
