@@ -37,7 +37,7 @@
         </div>
         <div class="account-pill" id="accountEmail">Account wird geladen...</div>
         <div class="balance-pill">
-          <span>Guthaben: <b>$<span id="displayBalance">18.74</span></b></span>
+          <span>Guthaben: <b>$<span id="displayBalance">…</span></b></span>
           <button id="btnRefreshBalance" class="balance-refresh-btn" title="Guthaben neu berechnen">
             <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
               <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
@@ -438,6 +438,11 @@
             </tbody>
           </table>
         </div>
+
+        <p class="modal-subtitle" style="display: block; margin: 12px 4px 0;">
+          Hinweis: Während der Pod aktiv läuft, wird zusätzlich die Container-Disk (Standard 30 GB) berechnet;
+          im Standby (Pause/Stop) bleibt ausschließlich das Volume (75 GB) kostenträchtig.
+        </p>
 
         <div class="info-cards-grid">
           <div class="info-card-item">

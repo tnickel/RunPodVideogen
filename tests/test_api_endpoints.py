@@ -1,0 +1,145 @@
+# Regressionstests für die HTTP-API (server.py) via FastAPI TestClient.
+#
+# Festschreibung der kritischen Bugfixes:
+#   P0-2  /api/config darf den RunPod-API-Key nie im Klartext ausliefern
+#   P1-5  Balance-Formel (base - session costs) + persistierbare Balance
+#   P2-11b Video-URLs müssen URL-encodet sein
+#   P3-20 Delete-Endpoint meldet 404, wenn nichts löschbar war
+# Zusätzlich: Path-Traversal-Schutz und WebSocket-Log-Replay.
+
+import json
+import urllib.parse
+
+import backend.config_manager as cm
+
+
+# ------------------------------------------------------------------ P0-2
+
+def test_config_endpoint_never_leaks_cleartext_api_key(client):
+    # Bewusst KEIN rpa_-Präfix: Der Pre-Commit-Hook blockt rpa_+15 Zeichen (auch Fake-Keys).
+    fake_key = "testkey_ABCDEFGHIJKLMNOP"
+    cm.update_config({"runpod_api_key": fake_key})
+
+    res = client.get("/api/config")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert "runpod_api_key" not in body, "Klartext-Key-Feld darf nicht im JSON sein"
+    assert fake_key not in res.text, "Key darf nirgends im Body auftauchen"
+    assert body["runpod_api_key_masked"] == "testke...MNOP"  # erste 6 + letzte 4 Zeichen
+
+
+def test_config_endpoint_masks_short_keys(client):
+    cm.update_config({"runpod_api_key": "abc"})
+
+    body = client.get("/api/config").json()
+
+    assert "runpod_api_key" not in body
+    assert body["runpod_api_key_masked"] == "***"
+
+
+# ------------------------------------------------------------------ P1-5
+
+def test_post_config_persists_balance(client, api_env):
+    """Regression: account_balance wurde früher von Pydantic still verworfen."""
+    res = client.post("/api/config", json={"account_balance": 42.5})
+
+    assert res.status_code == 200
+    on_disk = json.loads(api_env["cfg_file"].read_text(encoding="utf-8"))
+    assert on_disk["account_balance"] == 42.5
+
+
+def test_post_config_without_key_preserves_existing_key(client, api_env):
+    """Settings-Speichern ohne neue Key-Eingabe darf den vorhandenen Key nicht löschen."""
+    cm.update_config({"runpod_api_key": "testkey_SECRET123456"})
+
+    res = client.post("/api/config", json={"account_balance": 1.0})
+
+    assert res.status_code == 200
+    on_disk = json.loads(api_env["cfg_file"].read_text(encoding="utf-8"))
+    assert on_disk["runpod_api_key"] == "testkey_SECRET123456"
+
+
+def test_status_balance_subtracts_session_costs(client):
+    """Regression P1-5c: angezeigtes Guthaben = Basis - Session-Kosten."""
+    cm.update_config({"account_balance": 10.0})
+    import server as srv_mod  # das Singleton nutzt dieselbe isolierte Config
+    srv_mod.orchestrator.accumulated_cost = 2.5
+
+    body = client.get("/api/status").json()
+
+    assert body["account"]["balance"] == 7.5
+
+
+def test_status_email_without_network(client):
+    """Ohne API-Key darf /api/status kein Netzwerk machen und nicht crashen."""
+    body = client.get("/api/status").json()
+    assert "account" in body
+    assert isinstance(body["account"]["email"], str)
+
+
+# ------------------------------------------------------------------ P2-11b
+
+def test_videos_listing_returns_quoted_urls(client, api_env):
+    fname = "mein video #1 & co (final).mp4"
+    (api_env["outputs"] / fname).write_bytes(b"video-bytes")
+
+    res = client.get("/api/videos")
+
+    assert res.status_code == 200
+    entry = next(v for v in res.json()["videos"] if v["filename"] == fname)
+    assert entry["url"] == "/api/videos/file/" + urllib.parse.quote(fname)
+    assert " " not in entry["url"]
+    assert "#" not in entry["url"]
+
+    # Die encodete URL muss die Datei tatsächlich ausliefern:
+    assert client.get(entry["url"]).status_code == 200
+
+
+def test_video_file_endpoint_blocks_path_traversal(client):
+    assert client.get("/api/videos/file/..%5Cconfig.json").status_code == 404
+    assert client.get("/api/videos/file/nichtvorhanden.mp4").status_code == 404
+
+
+# ------------------------------------------------------------------ P3-20
+
+def test_delete_unknown_video_returns_404(client):
+    res = client.post("/api/videos/delete", json={"filename": "gibtsnicht.mp4"})
+    assert res.status_code == 404
+
+
+def test_delete_existing_video_returns_200(client, api_env):
+    fname = "loeschmich.mp4"
+    (api_env["outputs"] / fname).write_bytes(b"data")
+
+    res = client.post("/api/videos/delete", json={"filename": fname})
+
+    assert res.status_code == 200
+    assert not (api_env["outputs"] / fname).exists()
+
+
+# ------------------------------------------------------------------ WebSocket
+
+def test_ws_logs_replays_recent_history(client):
+    client.get("/api/status")  # sicherstellen, dass App läuft
+    import server as srv_mod
+    srv_mod.orchestrator.log("REGTEST_MARKER_42", level="INFO")
+
+    with client.websocket_connect("/ws/logs") as ws:
+        found = False
+        for _ in range(80):
+            msg = ws.receive_text()
+            if "REGTEST_MARKER_42" in msg:
+                found = True
+                break
+        assert found, "Beim Verbinden müssen die recent_logs replayspielt werden"
+
+
+def test_pod_start_rejected_in_invalid_state(client):
+    """Start-Endpoint lehnt ab, wenn bereits ein Pod aktiv ist (Guard-Test)."""
+    import server as srv_mod
+    srv_mod.orchestrator.status = "RUNNING"
+
+    res = client.post("/api/pod/start")
+
+    assert res.status_code == 400

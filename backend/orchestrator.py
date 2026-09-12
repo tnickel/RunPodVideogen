@@ -7,7 +7,7 @@ from collections import deque
 
 from backend.config_manager import load_config, update_config, get_outputs_dir
 from backend.runpod_client import RunPodClient
-from backend.ssh_client import SSHManager, get_or_create_ssh_keys
+from backend.ssh_client import SSHManager, get_or_create_ssh_keys, load_name_map, save_name_map
 
 class PodOrchestrator:
     def __init__(self):
@@ -279,7 +279,8 @@ class PodOrchestrator:
                             break
                     if ip and ssh_port:
                         break
-                self.log(f"Warte auf Container-Initialisierung... ({attempt+1}/60)")
+                if (attempt + 1) % 6 == 0:
+                    self.log(f"Warte auf Container-Initialisierung... ({attempt+1}/60)")
 
             if not ip or not ssh_port:
                 raise Exception("Timeout beim Warten auf öffentliche IP / SSH-Port des Containers.")
@@ -531,6 +532,9 @@ except Exception as e:
         """Deletes a video file locally and remotely on the pod (if running) to prevent re-sync."""
         safe_name = os.path.basename(filename)
         deleted_anything = False
+        # Falls der Name beim Download für Windows angepasst wurde, heißt die Datei
+        # auf dem Pod noch Original -> Mapping nutzen, sonst bleibt sie remote liegen.
+        original_name = load_name_map().get(safe_name, safe_name)
 
         # 1. Delete locally
         local_path = os.path.join(get_outputs_dir(), safe_name)
@@ -542,15 +546,21 @@ except Exception as e:
             except Exception as e:
                 self.log(f"Fehler beim lokalen Löschen von {safe_name}: {e}", level="WARNING")
 
+        # Mapping-Eintrag mit aufräumen, sobald die lokale Datei weg ist
+        if original_name != safe_name and not os.path.exists(local_path):
+            mapping = load_name_map()
+            if mapping.pop(safe_name, None) is not None:
+                save_name_map(mapping)
+
         # 2. Delete remotely if pod is running
         if self.pod_ip and self.pod_ssh_port and self.status == "RUNNING":
             try:
                 ssh = SSHManager(self.pod_ip, self.pod_ssh_port)
-                remote_escaped = shlex.quote(f"/workspace/Wan2GP/outputs/{safe_name}")
+                remote_escaped = shlex.quote(f"/workspace/Wan2GP/outputs/{original_name}")
                 code, _, _ = ssh.exec_command(f"rm -f {remote_escaped}")
                 if code == 0:
                     deleted_anything = True
-                self.log(f"Video auch auf dem Pod gelöscht: {safe_name}")
+                self.log(f"Video auch auf dem Pod gelöscht: {original_name}")
             except Exception as e:
                 self.log(f"Hinweis: Konnte Video auf Pod nicht löschen: {e}", level="WARNING")
 

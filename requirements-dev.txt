@@ -1,0 +1,4 @@
+# Entwicklungs- und Test-Abhängigkeiten (nicht für den Produktivbetrieb nötig)
+# Installation: pip install -r requirements-dev.txt
+pytest>=8.0
+httpx>=0.27

@@ -184,7 +184,7 @@ Kopiere `config.example.json` zu `config.json` und trage deinen API-Key ein:
   "standby_mode": "stop"
 }
 ```
-*(Die Datei `config.json` ist per `.gitignore` und Pre-Commit-Hook vor unbeabsichtigtem Einchecken geschützt).*
+*(Die Datei `config.json` ist per `.gitignore` und einen lokalen `pre-commit`-Hook (`.git/hooks/pre-commit`, blockt config.json, `rpa_`-Keys und private Keys) geschützt. Der Hook lebt nur in deinem lokalen `.git`-Verzeichnis — nach einem frischen Clone muss er ggf. neu angelegt werden. Nie mit `git add -f` erzwingen.)*
 
 ### 3. Server starten
 Unter Windows genügt ein Doppelklick auf:
@@ -199,6 +199,16 @@ python server.py
 Öffne anschließend im Browser:
 ```
 http://localhost:7880
+```
+
+### 4. Tests ausführen (empfohlen nach jeder Code-Änderung)
+Die pytest-Suite in `tests/` sichert die kritischen Bugfixes als Regressionstests
+(u. a. Resume-Logik, API-Key-Masking, Balance-Formel, Restart-Reconciliation,
+Background-Loop-Robustheit). Sie läuft vollständig offline gegen gemockte
+RunPod-/SSH-APIs und fügt niemals die echte `config.json` an:
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
 ```
 
 ---
@@ -220,6 +230,7 @@ RunPodVideogen/
 ├── outputs/                  # Lokale Synchronisation der gerenderten MP4s
 ├── scripts/                  # Cloud-Skripte
 │   └── bootstrap_pod.sh      # Automatisches Setup auf dem RunPod
+├── tests/                    # pytest-Regressionstests (offline, gemockt)
 ├── static/                   # Web-Frontend
 │   ├── css/style.css         # Glassmorphism Design & Responsive Layout
 │   ├── js/app.js             # UI Controller, State & Event-Handling

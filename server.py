@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from backend.config_manager import load_config, update_config, get_outputs_dir
+from backend.config_manager import load_config, update_config, get_outputs_dir, DEFAULT_CONFIG
 from backend.runpod_client import RunPodClient
 from backend.orchestrator import PodOrchestrator
 
@@ -78,9 +78,8 @@ class VideoDeleteModel(BaseModel):
 def get_status():
     state = orchestrator.get_state()
     cfg = load_config()
-    client = orchestrator.get_client()
-    
-    base_balance = float(cfg.get("account_balance", 18.74))
+
+    base_balance = float(cfg.get("account_balance", DEFAULT_CONFIG.get("account_balance", 0.0)))
     accumulated = float(state.get("accumulated_cost", 0.0))
     balance = max(0.0, round(base_balance - accumulated, 2))
 
@@ -202,7 +201,7 @@ def refresh_account(set_balance: float | None = None):
         update_config({"account_balance": round(set_balance, 2)})
         balance = round(set_balance, 2)
     else:
-        base_balance = float(cfg.get("account_balance", 18.74))
+        base_balance = float(cfg.get("account_balance", DEFAULT_CONFIG.get("account_balance", 0.0)))
         accumulated = float(state.get("accumulated_cost", 0.0))
         balance = max(0.0, round(base_balance - accumulated, 2))
 
@@ -269,8 +268,10 @@ if __name__ == "__main__":
     import uvicorn
     cfg = load_config()
     port = int(cfg.get("server_port", 7880))
+    # Default: nur lokal erreichbar. Für LAN-Zugriff "server_host": "0.0.0.0" in config.json setzen.
+    host = cfg.get("server_host", "127.0.0.1")
     print(f"=======================================================")
-    print(f"  RunPod VideoGen Studio startet auf Port {port}")
+    print(f"  RunPod VideoGen Studio startet auf {host}:{port}")
     print(f"  Öffne im Browser: http://localhost:{port}")
     print(f"=======================================================")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host=host, port=port)

@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import time
 import re
 import paramiko
@@ -9,6 +10,30 @@ from backend.config_manager import get_outputs_dir
 _SSH_KEY_DIR = os.path.join(os.path.expanduser("~"), ".ssh", "runpod_videogen")
 _SSH_PRIV_FILE = os.path.join(_SSH_KEY_DIR, "id_rsa")
 _SSH_PUB_FILE = os.path.join(_SSH_KEY_DIR, "id_rsa.pub")
+
+NAME_MAP_FILENAME = ".name_map.json"
+
+
+def _name_map_path() -> str:
+    return os.path.join(get_outputs_dir(), NAME_MAP_FILENAME)
+
+
+def load_name_map() -> dict:
+    """Liefert die Zuordnung {lokaler (sanitizierter) Dateiname: Remote-Originalname}."""
+    try:
+        with open(_name_map_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_name_map(mapping: dict) -> None:
+    try:
+        with open(_name_map_path(), "w", encoding="utf-8") as f:
+            json.dump(mapping, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[SSHManager] Hinweis: Name-Mapping konnte nicht gespeichert werden: {e}")
 
 def get_or_create_ssh_keys() -> Tuple[str, str]:
     """
@@ -87,6 +112,8 @@ class SSHManager:
         """
         local_dir = get_outputs_dir()
         downloaded = []
+        name_map = load_name_map()
+        map_dirty = False
 
         try:
             client = self.get_client(timeout=10)
@@ -115,6 +142,10 @@ class SSHManager:
                 safe_local_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', fname).rstrip(' .')
                 if not safe_local_name:
                     continue
+                if safe_local_name != fname:
+                    if name_map.get(safe_local_name) != fname:
+                        name_map[safe_local_name] = fname
+                        map_dirty = True
 
                 remote_path = f"{remote_dir}/{fname}"
                 local_path = os.path.join(local_dir, safe_local_name)
@@ -141,6 +172,9 @@ class SSHManager:
                             os.remove(part_path)
                         except Exception:
                             pass
+
+            if map_dirty:
+                save_name_map(name_map)
 
             sftp.close()
         except Exception as e:

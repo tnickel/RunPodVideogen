@@ -20,7 +20,7 @@ DEFAULT_CONFIG = {
     "standby_mode": "stop",
     "auto_shutdown_minutes": 30,
     "server_port": 7880,
-    "model_preset": "MiniMax H3 FL2VA Pruned 20B (PDD 8-Step)",
+    "server_host": "127.0.0.1",
     "auto_sync_videos": True,
     "sync_interval_seconds": 15
 }

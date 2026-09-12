@@ -110,7 +110,10 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentHourlyRate = 0.34;
   let timerInterval = null;
   let activeProxyUrl = null;
-  let currentBalance = 18.74;
+  let currentBalance = 0;
+
+  // RunPod Volume-Storage-Preis (zentrale Konstante, falls RunPod Preise ändert)
+  const RUNPOD_DISK_USD_PER_GB_MONTH = 0.07;
 
   // Format Seconds to HH:MM:SS
   function formatTime(seconds) {
@@ -160,7 +163,7 @@ document.addEventListener("DOMContentLoaded", () => {
       hourlyRateDisplay.textContent = `$${currentHourlyRate.toFixed(2)} /h`;
       
       const volumeGb = data.config && data.config.volume_disk_gb ? data.config.volume_disk_gb : 75;
-      const diskMonthly = volumeGb * 0.07; // RunPod storage: $0.07/GB/mo (~$5.25 for 75GB)
+      const diskMonthly = volumeGb * RUNPOD_DISK_USD_PER_GB_MONTH; // ~$5.25 for 75GB
       const diskDaily = diskMonthly / 30.0; // ~$0.175 / day
       const diskWeekly = diskDaily * 7.0; // ~$1.225 / week
       const diskHourly = diskMonthly / 720.0; // ~$0.00729 / h
@@ -255,8 +258,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Live Session Timer
       if (data.status === "RUNNING") {
-        currentUptime = data.uptime_seconds || 0;
-        sessionTimer.textContent = formatTime(currentUptime);
+        const serverUptime = data.uptime_seconds || 0;
+        // Nur bei größerer Abweichung vom lokalen Takt übernehmen (verhindert 3s-Jitter)
+        if (currentUptime === 0 || Math.abs(serverUptime - currentUptime) > 5) {
+          currentUptime = serverUptime;
+          sessionTimer.textContent = formatTime(currentUptime);
+        }
         sessionCostDisplay.textContent = `$${(data.accumulated_cost || 0).toFixed(4)}`;
         if (!timerInterval) {
           timerInterval = setInterval(tickTimer, 1000);
@@ -1004,7 +1011,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const ws = new WebSocket(`${proto}//${window.location.host}/ws/logs`);
 
     ws.onopen = () => {
-      terminalLog.textContent += "\n[SYSTEM] Verbunden mit Live-Log Stream.\n";
+      // Terminal leeren, damit der Log-Replay nach einem Reconnect keine Duplikate erzeugt
+      terminalLog.textContent = "[SYSTEM] Verbunden mit Live-Log Stream.\n";
     };
 
     ws.onmessage = (event) => {
