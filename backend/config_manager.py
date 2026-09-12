@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+import tempfile
 
 _CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json"))
 _OUTPUTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "outputs"))
@@ -50,8 +51,18 @@ def load_config() -> dict:
             return DEFAULT_CONFIG.copy()
 
 def save_config_unsafe(cfg: dict):
-    with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    d = os.path.dirname(_CONFIG_PATH) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, _CONFIG_PATH)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 def update_config(updates: dict) -> dict:
     with _lock:

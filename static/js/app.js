@@ -194,7 +194,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const hoursLeft = currentHourlyRate > 0 ? (currentBalance / currentHourlyRate).toFixed(1) : "0";
         cockpitRunTimeRemaining.textContent = `~${hoursLeft}h GPU`;
 
-      } else if (status === "STOPPED" || data.pod_id) {
+      } else if (status === "STOPPED") {
         // 🟡 GELB: Standby (GPU aus, Modelle erhalten)
         ampelRed.classList.remove("active");
         ampelYellow.classList.add("active");
@@ -213,6 +213,24 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const daysLeft = diskDaily > 0 ? (currentBalance / diskDaily).toFixed(0) : "0";
         cockpitRunTimeRemaining.textContent = `~${daysLeft} Tage Standby`;
+
+      } else if (status === "ERROR") {
+        // ⚠️ ERROR Zustand
+        ampelRed.classList.add("active");
+        ampelYellow.classList.remove("active");
+        ampelGreen.classList.remove("active");
+        if (costCockpitCard) costCockpitCard.className = "card cost-cockpit-card state-red";
+
+        ampelStatusTag.className = "ampel-status-tag red";
+        ampelStatusTag.textContent = "⚠️ FEHLER IM POD-SETUP";
+        ampelHeadline.textContent = "Status prüfen & intervenieren";
+        ampelDesc.textContent = data.status_detail || "Beim Starten oder Ausführen des Pods ist ein Fehler aufgetreten. Überprüfe die Terminal-Logs unten oder lösche den Pod.";
+
+        cockpitHourlyRate.innerHTML = `$${currentHourlyRate.toFixed(3)} <span class="rate-unit">/ Std. (falls Pod läuft)</span>`;
+        cockpitDailyRate.textContent = "-";
+        cockpitWeeklyRate.textContent = "-";
+        cockpitDiskMonthly.textContent = `$${diskMonthly.toFixed(2)}`;
+        cockpitRunTimeRemaining.textContent = "Intervention nötig";
 
       } else {
         // 🟢 GRÜN: Null-Kosten (Aus & Gelöscht)
@@ -266,7 +284,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Hardware / AutoShutdown
       if (data.config) {
-        if (data.config.auto_shutdown_minutes !== undefined) {
+        if (data.config.gpu_type_id && gpuSelect && Array.from(gpuSelect.options).some(o => o.value === data.config.gpu_type_id)) {
+          if (document.activeElement !== gpuSelect) {
+            gpuSelect.value = data.config.gpu_type_id;
+          }
+        }
+        if (data.config.cloud_type && cloudTypeSelect && document.activeElement !== cloudTypeSelect) {
+          cloudTypeSelect.value = data.config.cloud_type;
+        }
+        if (data.config.auto_shutdown_minutes !== undefined && document.activeElement !== autoShutdownSelect) {
           autoShutdownSelect.value = String(data.config.auto_shutdown_minutes);
         }
         if (data.config.volume_disk_gb) {
@@ -322,11 +348,11 @@ document.addEventListener("DOMContentLoaded", () => {
         btnStart.disabled = false;
         btnStart.innerHTML = "<span>🚀</span> Pod Starten";
         btnPause.disabled = true;
-        btnTerminate.disabled = true;
+        btnTerminate.disabled = !data.pod_id;
         btnOpenWebUI.disabled = true;
         if (btnCockpitPause) btnCockpitPause.style.display = "none";
         if (btnCockpitResume) btnCockpitResume.style.display = "none";
-        if (btnCockpitTerminate) btnCockpitTerminate.style.display = "none";
+        if (btnCockpitTerminate) btnCockpitTerminate.style.display = data.pod_id ? "inline-flex" : "none";
       }
 
       // Update Step-by-Step Guidance & Stepper
@@ -576,6 +602,11 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
 
+      // Skip rebuilding gallery if user is currently confirming a delete
+      if (document.querySelector(".video-delete-btn.confirming")) {
+        return;
+      }
+
       galleryGrid.innerHTML = "";
       data.videos.forEach(v => {
         const card = document.createElement("div");
@@ -583,23 +614,26 @@ document.addEventListener("DOMContentLoaded", () => {
         const dateStr = new Date(v.modified * 1000).toLocaleString("de-DE");
 
         card.innerHTML = `
-          <div class="video-thumb" data-url="${v.url}" data-title="${v.filename}" data-meta="${v.size_mb} MB • ${dateStr}">
+          <div class="video-thumb">
             <video src="${v.url}#t=0.5" preload="metadata"></video>
             <div class="play-overlay">
               <svg width="18" height="18" fill="#fff" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             </div>
-            <button class="video-delete-btn" title="Video löschen" data-filename="${v.filename}">
+            <button class="video-delete-btn" title="Video löschen">
               &times;
             </button>
           </div>
           <div class="video-info">
-            <div class="video-title" title="${v.filename}">${v.filename}</div>
+            <div class="video-title"></div>
             <div class="video-meta">
               <span>${v.size_mb} MB</span>
               <span>${dateStr}</span>
             </div>
           </div>
         `;
+
+        card.querySelector(".video-title").textContent = v.filename;
+        card.querySelector(".video-title").title = v.filename;
 
         // Click on thumbnail opens video modal (unless delete button clicked)
         card.querySelector(".video-thumb").addEventListener("click", (e) => {
@@ -921,9 +955,10 @@ document.addEventListener("DOMContentLoaded", () => {
       const res = await fetch("/api/config");
       if (res.ok) {
         const cfg = await res.json();
-        cfgApiKey.value = cfg.runpod_api_key || "";
+        cfgApiKey.value = cfg.runpod_api_key_masked || "";
+        cfgApiKey.placeholder = "Neuen Key nur eingeben, wenn er geändert werden soll";
         cfgEmail.value = cfg.account_email || "";
-        cfgBalance.value = (cfg.account_balance || currentBalance).toFixed(2);
+        cfgBalance.value = (cfg.account_balance !== undefined ? cfg.account_balance : currentBalance).toFixed(2);
       }
     } catch (_) {}
     settingsModal.classList.add("active");
@@ -938,15 +973,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
   saveSettingsBtn.addEventListener("click", async () => {
     const key = cfgApiKey.value.trim();
-    if (!key) {
-      alert("API Key darf nicht leer sein.");
-      return;
+    const bal = parseFloat(cfgBalance.value);
+    const body = { account_balance: isNaN(bal) ? currentBalance : bal };
+    if (key && !key.includes("...")) {
+      body.runpod_api_key = key;
     }
-    const bal = parseFloat(cfgBalance.value) || currentBalance;
     await fetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ runpod_api_key: key, account_balance: bal })
+      body: JSON.stringify(body)
     });
     closeSettings();
     fetchStatus();

@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import shlex
 from typing import Dict, Any, List, Optional
 from collections import deque
 
@@ -28,6 +29,8 @@ class PodOrchestrator:
         
         self.is_bootstrapping = False
         self._stop_bg_thread = False
+        self._email_cache: Optional[str] = None
+        self._email_cache_time: float = 0.0
         
         # Load persisted pod if available
         cfg = load_config()
@@ -37,6 +40,10 @@ class PodOrchestrator:
         # Start background polling/sync worker thread
         self.bg_thread = threading.Thread(target=self._background_loop, daemon=True)
         self.bg_thread.start()
+
+        # Reconcile runtime state if a pod was previously active
+        if self.pod_id:
+            threading.Thread(target=self._reconcile_startup_state, daemon=True).start()
 
     def log(self, message: str, level: str = "INFO"):
         ts = time.strftime("%H:%M:%S")
@@ -61,7 +68,87 @@ class PodOrchestrator:
 
     def get_client(self) -> RunPodClient:
         cfg = load_config()
-        return RunPodClient(cfg.get("runpod_api_key", ""))
+        key = cfg.get("runpod_api_key", "")
+        return RunPodClient(key)
+
+    def get_account_email(self) -> str:
+        """Returns the account email, cached for 300s to avoid spamming RunPod API on every poll."""
+        now = time.time()
+        if self._email_cache and (now - self._email_cache_time < 300):
+            return self._email_cache
+        cfg = load_config()
+        cached_email = cfg.get("account_email", "")
+        try:
+            client = self.get_client()
+            user = client.get_myself()
+            if user and "email" in user and user["email"]:
+                self._email_cache = user["email"]
+                self._email_cache_time = now
+                if user["email"] != cached_email:
+                    update_config({"account_email": user["email"]})
+                return user["email"]
+        except Exception:
+            pass
+        return cached_email
+
+    def _reconcile_startup_state(self):
+        """Recovers runtime state (IP, SSH port, proxy URL, cost, uptime) after server restart."""
+        if not self.pod_id:
+            return
+        try:
+            client = self.get_client()
+            pod = client.get_pod(self.pod_id)
+            if not pod:
+                self.log(f"Persistierter Pod {self.pod_id} existiert auf RunPod nicht mehr. Bereinige Status...", level="WARNING")
+                with self.lock:
+                    self.pod_id = None
+                    self.status = "OFFLINE"
+                    self.status_detail = "Bereit"
+                update_config({"active_pod_id": None, "active_pod_status": "OFFLINE"})
+                return
+
+            desired = pod.get("desiredStatus")
+            if desired == "RUNNING":
+                runtime = pod.get("runtime") or {}
+                ports = runtime.get("ports") or []
+                ip = None
+                ssh_port = None
+                for p in ports:
+                    if p.get("privatePort") == 22:
+                        ip = p.get("ip")
+                        ssh_port = p.get("publicPort")
+                        break
+
+                with self.lock:
+                    self.status = "RUNNING"
+                    self.status_detail = "Wan2GP aktiv & verbunden"
+                    self.pod_ip = ip
+                    self.pod_ssh_port = int(ssh_port) if ssh_port else None
+                    self.proxy_url = RunPodClient.get_proxy_url(self.pod_id, 7860)
+                    self.hourly_rate = float(pod.get("costPerHr") or 0.34)
+                    uptime = runtime.get("uptimeInSeconds") or 0
+                    self.session_start_time = time.time() - uptime
+                    self.last_activity_time = time.time()
+                update_config({"active_pod_status": "RUNNING"})
+                self.log(f"Zustand nach Server-Neustart wiederhergestellt: Pod {self.pod_id} läuft (SSH: {ip}:{ssh_port})")
+
+            elif desired == "EXITED":
+                with self.lock:
+                    self.status = "STOPPED"
+                    self.status_detail = "GPU pausiert (Standby)"
+                    self.pod_ip = None
+                    self.pod_ssh_port = None
+                update_config({"active_pod_status": "STOPPED"})
+                self.log(f"Zustand nach Server-Neustart wiederhergestellt: Pod {self.pod_id} ist im Standby.")
+
+            elif desired == "TERMINATED":
+                with self.lock:
+                    self.pod_id = None
+                    self.status = "OFFLINE"
+                    self.status_detail = "Bereit"
+                update_config({"active_pod_id": None, "active_pod_status": "OFFLINE"})
+        except Exception as e:
+            self.log(f"Hinweis: Status-Reconciliation nach Start übersprungen ({e})", level="WARNING")
 
     def start_pod(self) -> Dict[str, Any]:
         with self.lock:
@@ -129,18 +216,26 @@ class PodOrchestrator:
         
         pod_id = self.pod_id or cfg.get("active_pod_id")
 
-        # Check if existing stopped pod can be resumed
+        # Check if existing stopped pod can be resumed or if it is already running
         can_resume = False
+        already_running = False
         if pod_id:
             try:
                 pod_info = client.get_pod(pod_id)
-                if pod_info and pod_info.get("desiredStatus") in ["STOPPED", "PAUSED"]:
-                    can_resume = True
+                if pod_info:
+                    desired = pod_info.get("desiredStatus")
+                    if desired == "EXITED":
+                        can_resume = True
+                    elif desired == "RUNNING":
+                        already_running = True
             except Exception:
                 can_resume = False
+                already_running = False
 
         try:
-            if can_resume:
+            if already_running:
+                self.log(f"Pod {pod_id} existiert und läuft bereits. Verwende ihn weiter...")
+            elif can_resume:
                 self.log(f"Reaktiviere bestehenden Pod {pod_id}...")
                 client.resume_pod(pod_id)
             else:
@@ -166,6 +261,7 @@ class PodOrchestrator:
             # Wait for RUNNING and SSH port mapping
             self.log("Warte auf Zuweisung von IP und SSH-Port durch RunPod...")
             ip, ssh_port = None, None
+            pod_info = None
             for attempt in range(60):
                 time.sleep(5)
                 pod_info = client.get_pod(pod_id)
@@ -173,13 +269,6 @@ class PodOrchestrator:
                     continue
 
                 status = pod_info.get("desiredStatus")
-                cost = pod_info.get("costPerHr")
-                if cost:
-                    try:
-                        self.hourly_rate = float(cost)
-                    except ValueError:
-                        pass
-
                 runtime = pod_info.get("runtime")
                 if status == "RUNNING" and runtime:
                     ports = runtime.get("ports", [])
@@ -187,25 +276,36 @@ class PodOrchestrator:
                         if p.get("privatePort") == 22:
                             ip = p.get("ip")
                             ssh_port = p.get("publicPort")
-                            if ip and ssh_port:
-                                break
+                            break
                     if ip and ssh_port:
                         break
+                self.log(f"Warte auf Container-Initialisierung... ({attempt+1}/60)")
 
-            if not (ip and ssh_port):
-                raise Exception("Timeout: RunPod hat innerhalb von 5 Minuten keinen SSH-Port gemeldet.")
+            if not ip or not ssh_port:
+                raise Exception("Timeout beim Warten auf öffentliche IP / SSH-Port des Containers.")
 
             with self.lock:
                 self.pod_ip = ip
                 self.pod_ssh_port = int(ssh_port)
                 self.proxy_url = RunPodClient.get_proxy_url(pod_id, 7860)
+                if pod_info and pod_info.get("costPerHr"):
+                    try:
+                        self.hourly_rate = float(pod_info["costPerHr"])
+                    except ValueError:
+                        pass
                 self.status = "BOOTSTRAPPING"
                 self.status_detail = "Richte Wan2GP & Modell-Umgebung ein..."
 
             self.log(f"Pod läuft! SSH: {ip}:{ssh_port} | Proxy: {self.proxy_url}")
             
             # Bootstrap Wan2GP via SSH
-            self._bootstrap_wan2gp(ip, int(ssh_port))
+            bootstrap_ok = self._bootstrap_wan2gp(ip, int(ssh_port))
+            if not bootstrap_ok:
+                with self.lock:
+                    self.status = "ERROR"
+                    self.status_detail = "Bootstrap fehlgeschlagen - Terminal prüfen"
+                update_config({"active_pod_status": "ERROR"})
+                return
 
             with self.lock:
                 self.status = "RUNNING"
@@ -328,36 +428,69 @@ except Exception as e:
             sleep 4
         fi
         """
-        code, out, err = ssh.exec_command(bootstrap_script, timeout=300)
+        code, out, err = ssh.exec_command(bootstrap_script, timeout=900)
         self.log(f"Bootstrap-Ausgabe:\n{out}")
         if code != 0:
-            self.log(f"Bootstrap-Fehler (Code {code}):\n{err}", level="WARNING")
+            self.log(f"Bootstrap-Fehler (Code {code}):\n{err}", level="ERROR")
+            return False
+
+        # Readiness poll: verify that port 7860 responds
+        self.log("Prüfe Erreichbarkeit der Wan2GP WebUI (Port 7860)...")
+        for attempt in range(18):
+            time.sleep(5)
+            chk_code, chk_out, _ = ssh.exec_command("curl -sf -o /dev/null http://127.0.0.1:7860 && echo READY", timeout=10)
+            if "READY" in chk_out:
+                self.log("Wan2GP WebUI ist erreichbar und bereit!")
+                return True
+            self.log(f"Warte auf Wan2GP WebUI... ({attempt+1}/18)")
+
+        self.log("Hinweis: Wan2GP braucht eventuell noch etwas Zeit zum Laden der Modellgewichte.", level="WARNING")
+        return True
 
     def _background_loop(self):
         """Monitors session cost, auto-shutdown timer and syncs videos."""
         sync_counter = 0
         while not self._stop_bg_thread:
             time.sleep(2)
-            cfg = load_config()
-
-            if self.status == "RUNNING":
+            try:
+                cfg = load_config()
                 now = time.time()
+
+                with self.lock:
+                    status = self.status
+
+                if status != "RUNNING":
+                    continue
+
                 # Update live cost
                 if self.session_start_time:
                     elapsed_hours = (now - self.session_start_time) / 3600.0
                     self.accumulated_cost = elapsed_hours * self.hourly_rate
 
                 # Auto-Shutdown Check
-                auto_shut = int(cfg.get("auto_shutdown_minutes", 30))
+                try:
+                    auto_shut = int(cfg.get("auto_shutdown_minutes", 30) or 0)
+                except (ValueError, TypeError):
+                    auto_shut = 30
+
                 if auto_shut > 0:
                     idle_seconds = now - self.last_activity_time
                     if idle_seconds > (auto_shut * 60):
-                        self.log(f"Auto-Shutdown: {auto_shut} Minuten Inaktivität erreicht! Pausiere GPU (Stop Pod - 30 GB Modelle bleiben auf Platte erhalten)...", level="WARNING")
-                        self.stop_pod()
+                        if cfg.get("standby_mode", "stop") == "terminate":
+                            self.log("Auto-Shutdown: Inaktivität erreicht! Terminiere Pod (Modus 'Löschen')...", level="WARNING")
+                            self.terminate_pod()
+                        else:
+                            self.log(f"Auto-Shutdown: {auto_shut} Minuten Inaktivität erreicht! Pausiere GPU (Stop Pod)...", level="WARNING")
+                            self.stop_pod()
 
                 # Sync Videos every ~15 seconds
                 sync_counter += 2
-                if sync_counter >= cfg.get("sync_interval_seconds", 15) and cfg.get("auto_sync_videos", True):
+                try:
+                    sync_interval = int(cfg.get("sync_interval_seconds", 15) or 15)
+                except (ValueError, TypeError):
+                    sync_interval = 15
+
+                if sync_counter >= sync_interval and cfg.get("auto_sync_videos", True):
                     sync_counter = 0
                     if self.pod_ip and self.pod_ssh_port:
                         try:
@@ -367,8 +500,10 @@ except Exception as e:
                                 self.last_activity_time = now
                                 self.log(f"Neu synchronisierte Videos: {', '.join(new_vids)}")
                         except Exception as e:
-                            # Log silently without spamming
                             pass
+            except Exception as e:
+                self.log(f"Hintergrund-Dienst Fehler (wird abgefangen): {e}", level="ERROR")
+                time.sleep(5)
 
     def get_state(self) -> Dict[str, Any]:
         cfg = load_config()
@@ -395,11 +530,14 @@ except Exception as e:
     def delete_video(self, filename: str) -> bool:
         """Deletes a video file locally and remotely on the pod (if running) to prevent re-sync."""
         safe_name = os.path.basename(filename)
+        deleted_anything = False
+
         # 1. Delete locally
         local_path = os.path.join(get_outputs_dir(), safe_name)
         if os.path.exists(local_path):
             try:
                 os.remove(local_path)
+                deleted_anything = True
                 self.log(f"Video lokal gelöscht: {safe_name}")
             except Exception as e:
                 self.log(f"Fehler beim lokalen Löschen von {safe_name}: {e}", level="WARNING")
@@ -408,10 +546,13 @@ except Exception as e:
         if self.pod_ip and self.pod_ssh_port and self.status == "RUNNING":
             try:
                 ssh = SSHManager(self.pod_ip, self.pod_ssh_port)
-                ssh.exec_command(f"rm -f '/workspace/Wan2GP/outputs/{safe_name}'")
+                remote_escaped = shlex.quote(f"/workspace/Wan2GP/outputs/{safe_name}")
+                code, _, _ = ssh.exec_command(f"rm -f {remote_escaped}")
+                if code == 0:
+                    deleted_anything = True
                 self.log(f"Video auch auf dem Pod gelöscht: {safe_name}")
             except Exception as e:
                 self.log(f"Hinweis: Konnte Video auf Pod nicht löschen: {e}", level="WARNING")
 
-        return True
+        return deleted_anything
 

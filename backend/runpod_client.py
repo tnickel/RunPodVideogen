@@ -16,11 +16,14 @@ _retry_strategy = Retry(
 _session.mount("https://", HTTPAdapter(max_retries=_retry_strategy))
 _session.mount("http://", HTTPAdapter(max_retries=_retry_strategy))
 
+# Dedicated session without automatic retries for mutating operations (prevent duplicate pod creation)
+_no_retry_session = requests.Session()
+
 class RunPodClient:
     def __init__(self, api_key: str):
         self.api_key = api_key.strip() if api_key else ""
 
-    def _request(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _request(self, query: str, variables: Optional[Dict[str, Any]] = None, mutating: bool = False) -> Dict[str, Any]:
         if not self.api_key:
             raise ValueError("RunPod API Key ist nicht konfiguriert.")
 
@@ -33,7 +36,8 @@ class RunPodClient:
         if variables:
             payload["variables"] = variables
 
-        res = _session.post(url, json=payload, headers=headers, timeout=25)
+        session = _no_retry_session if mutating else _session
+        res = session.post(url, json=payload, headers=headers, timeout=25)
         res.raise_for_status()
         res_json = res.json()
 
@@ -163,7 +167,7 @@ class RunPodClient:
         # Use runpod-torch-v240 (PyTorch 2.4 / CUDA 12.4) by default
         input_payload["templateId"] = template_id if template_id else "runpod-torch-v240"
 
-        data = self._request(query, {"input": input_payload})
+        data = self._request(query, {"input": input_payload}, mutating=True)
         pod_info = data.get("podFindAndDeployOnDemand", {})
         pod_id = pod_info.get("id")
         if not pod_id:
@@ -180,7 +184,7 @@ class RunPodClient:
         }
         """
         try:
-            self._request(query, {"input": {"podId": pod_id, "gpuCount": gpu_count}})
+            self._request(query, {"input": {"podId": pod_id, "gpuCount": gpu_count}}, mutating=True)
             return True
         except Exception as e:
             print(f"[RunPodClient] Error resuming pod {pod_id}: {e}")
@@ -196,7 +200,7 @@ class RunPodClient:
         }
         """
         try:
-            self._request(query, {"input": {"podId": pod_id}})
+            self._request(query, {"input": {"podId": pod_id}}, mutating=True)
             return True
         except Exception as e:
             print(f"[RunPodClient] Error stopping pod {pod_id}: {e}")
@@ -209,7 +213,7 @@ class RunPodClient:
         }
         """
         try:
-            self._request(query, {"podId": pod_id})
+            self._request(query, {"podId": pod_id}, mutating=True)
             return True
         except Exception as e:
             print(f"[RunPodClient] Error terminating pod {pod_id}: {e}")

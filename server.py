@@ -2,7 +2,9 @@ import os
 import sys
 import asyncio
 import subprocess
+import urllib.parse
 from typing import Dict, Any, List
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
@@ -12,7 +14,15 @@ from backend.config_manager import load_config, update_config, get_outputs_dir
 from backend.runpod_client import RunPodClient
 from backend.orchestrator import PodOrchestrator
 
-app = FastAPI(title="RunPod VideoGen Studio", version="1.0.0")
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
+    yield
+
+app = FastAPI(title="RunPod VideoGen Studio", version="1.0.0", lifespan=lifespan)
 orchestrator = PodOrchestrator()
 
 # Mount outputs directory for direct streaming if needed
@@ -42,17 +52,17 @@ ws_manager = ConnectionManager()
 
 # Hook orchestrator logs to WebSocket
 def forward_log_to_ws(entry: str):
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.run_coroutine_threadsafe(ws_manager.broadcast(entry), loop)
-    except Exception:
-        pass
+    if _main_loop is not None and _main_loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(ws_manager.broadcast(entry), _main_loop)
+        except Exception:
+            pass
 
 orchestrator.add_listener(forward_log_to_ws)
 
 class ConfigUpdateModel(BaseModel):
     runpod_api_key: str | None = None
+    account_balance: float | None = None
     gpu_type_id: str | None = None
     cloud_type: str | None = None
     volume_disk_gb: int | None = None
@@ -62,7 +72,6 @@ class ConfigUpdateModel(BaseModel):
 
 class VideoDeleteModel(BaseModel):
     filename: str
-    account_balance: float | None = None
 
 # Routes
 @app.get("/api/status")
@@ -71,16 +80,14 @@ def get_status():
     cfg = load_config()
     client = orchestrator.get_client()
     
+    base_balance = float(cfg.get("account_balance", 18.74))
+    accumulated = float(state.get("accumulated_cost", 0.0))
+    balance = max(0.0, round(base_balance - accumulated, 2))
+
     account_info = {
-        "email": cfg.get("account_email", ""),
-        "balance": float(cfg.get("account_balance", 18.74))
+        "email": orchestrator.get_account_email(),
+        "balance": balance
     }
-    try:
-        user = client.get_myself()
-        if user and "email" in user:
-            account_info["email"] = user.get("email", account_info["email"])
-    except Exception:
-        pass
 
     return {
         **state,
@@ -151,7 +158,7 @@ def list_videos():
                 "filename": f,
                 "size_mb": round(stat.st_size / (1024 * 1024), 2),
                 "modified": stat.st_mtime,
-                "url": f"/api/videos/file/{f}"
+                "url": f"/api/videos/file/{urllib.parse.quote(f)}"
             })
     files.sort(key=lambda x: x["modified"], reverse=True)
     return {"videos": files}
@@ -211,16 +218,20 @@ def refresh_account(set_balance: float | None = None):
 def delete_video_endpoint(model: VideoDeleteModel):
     safe_name = os.path.basename(model.filename)
     success = orchestrator.delete_video(safe_name)
-    return {"success": success, "filename": safe_name}
+    if not success:
+        raise HTTPException(status_code=404, detail="Datei konnte lokal oder remote nicht gefunden werden")
+    return {"success": True, "filename": safe_name}
 
 
 @app.get("/api/config")
 def get_config_endpoint():
     cfg = load_config()
-    # Mask API key partially for security
+    # Mask API key completely to prevent leaking cleartext secrets
     key = cfg.get("runpod_api_key", "")
-    masked = key[:6] + "..." + key[-4:] if len(key) > 10 else key
-    return {**cfg, "runpod_api_key_masked": masked}
+    masked = key[:6] + "..." + key[-4:] if len(key) > 10 else ("***" if key else "")
+    safe = {k: v for k, v in cfg.items() if k != "runpod_api_key"}
+    safe["runpod_api_key_masked"] = masked
+    return safe
 
 @app.post("/api/config")
 def update_config_endpoint(model: ConfigUpdateModel):

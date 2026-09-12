@@ -170,7 +170,7 @@ cd RunPodVideogen
 pip install -r requirements.txt
 ```
 
-*(Benötigte Bibliotheken: `fastapi`, `uvicorn`, `paramiko`, `httpx`, `websockets`)*
+*(Benötigte Bibliotheken aus `requirements.txt`: `fastapi`, `uvicorn[standard]`, `pydantic`, `paramiko`, `requests`)*
 
 ### 2. Konfiguration anlegen
 Kopiere `config.example.json` zu `config.json` und trage deinen API-Key ein:
@@ -178,7 +178,7 @@ Kopiere `config.example.json` zu `config.json` und trage deinen API-Key ein:
 {
   "runpod_api_key": "DEIN_RUNPOD_API_KEY",
   "account_balance": 18.74,
-  "default_gpu": "NVIDIA A40",
+  "gpu_type_id": "NVIDIA A40",
   "volume_disk_gb": 75,
   "auto_shutdown_minutes": 30,
   "standby_mode": "stop"

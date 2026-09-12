@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import re
 import paramiko
 from typing import Tuple, List, Optional, Callable
 from backend.config_manager import get_outputs_dir
@@ -106,9 +107,17 @@ class SSHManager:
                 if not (fname.lower().endswith(".mp4") or fname.lower().endswith(".png") or fname.lower().endswith(".jpg")):
                     continue
 
-                # Ignore files modified in the last 5 seconds (might still be writing)
+                # Ignore files modified in the last 15 seconds (might still be writing)
+                if time.time() - attr.st_mtime < 15:
+                    continue
+
+                # Sanitize filename for local Windows filesystem
+                safe_local_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', fname).rstrip(' .')
+                if not safe_local_name:
+                    continue
+
                 remote_path = f"{remote_dir}/{fname}"
-                local_path = os.path.join(local_dir, fname)
+                local_path = os.path.join(local_dir, safe_local_name)
 
                 # If file exists and size matches, skip
                 if os.path.exists(local_path):
@@ -123,8 +132,8 @@ class SSHManager:
                     if os.path.exists(local_path):
                         os.remove(local_path)
                     os.rename(part_path, local_path)
-                    downloaded.append(fname)
-                    self._log(f"Download abgeschlossen: {fname}")
+                    downloaded.append(safe_local_name)
+                    self._log(f"Download abgeschlossen: {safe_local_name}")
                 except Exception as dl_err:
                     self._log(f"Fehler beim Download von {fname}: {dl_err}")
                     if os.path.exists(part_path):

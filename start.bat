@@ -16,7 +16,7 @@ if %errorlevel% neq 0 (
 )
 
 echo [INFO] Starte lokalen Server auf Port 7880...
-start "" "http://localhost:7880"
+start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:7880"
 python server.py
 
 pause
