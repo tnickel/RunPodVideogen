@@ -239,7 +239,7 @@ class PodOrchestrator:
                 self.log(f"Reaktiviere bestehenden Pod {pod_id}...")
                 client.resume_pod(pod_id)
             else:
-                gpu_type = cfg.get("gpu_type_id", "NVIDIA GeForce RTX 4090")
+                gpu_type = cfg.get("gpu_type_id", "NVIDIA A40")
                 cloud_type = cfg.get("cloud_type", "ALL")
                 vol_gb = int(cfg.get("volume_disk_gb", 75))
                 cont_gb = int(cfg.get("container_disk_gb", 30))
@@ -522,7 +522,7 @@ except Exception as e:
             "hourly_rate": round(self.hourly_rate, 2),
             "accumulated_cost": round(self.accumulated_cost, 4),
             "standby_mode": cfg.get("standby_mode", "stop"),
-            "gpu_type_id": cfg.get("gpu_type_id", "NVIDIA GeForce RTX 4090"),
+            "gpu_type_id": cfg.get("gpu_type_id", "NVIDIA A40"),
             "auto_shutdown_minutes": cfg.get("auto_shutdown_minutes", 30),
             "recent_logs": list(self.log_history)[-50:]
         }

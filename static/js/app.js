@@ -568,15 +568,16 @@ document.addEventListener("DOMContentLoaded", () => {
       data.gpus.forEach(g => {
         const opt = document.createElement("option");
         opt.value = g.id;
-        const commPrice = g.communityPrice ? `$${g.communityPrice.toFixed(2)}` : "n/a";
-        const secPrice = g.securePrice ? `$${g.securePrice.toFixed(2)}` : "n/a";
-        opt.textContent = `${g.displayName || g.id} (${g.vram} GB) • Community: ${commPrice}/h | Secure: ${secPrice}/h`;
+        const badge = g.id === "NVIDIA A40" ? " ⭐ (Empfohlen)" : "";
+        opt.textContent = `${g.displayName || g.id} (${g.vram} GB)${badge} • Community: ${commPrice}/h | Secure: ${secPrice}/h`;
         gpuSelect.appendChild(opt);
       });
 
-      // Restore selection if exists
+      // Restore selection if exists (preferred default: NVIDIA A40)
       if (Array.from(gpuSelect.options).some(o => o.value === currentVal)) {
         gpuSelect.value = currentVal;
+      } else if (Array.from(gpuSelect.options).some(o => o.value === "NVIDIA A40")) {
+        gpuSelect.value = "NVIDIA A40";
       } else if (Array.from(gpuSelect.options).some(o => o.value === "NVIDIA GeForce RTX 4090")) {
         gpuSelect.value = "NVIDIA GeForce RTX 4090";
       }

@@ -13,7 +13,7 @@ DEFAULT_CONFIG = {
     "account_balance": 18.74,
     "active_pod_id": None,
     "active_pod_status": "OFFLINE",
-    "gpu_type_id": "NVIDIA GeForce RTX 4090",
+    "gpu_type_id": "NVIDIA A40",
     "cloud_type": "ALL",
     "volume_disk_gb": 75,
     "container_disk_gb": 30,
