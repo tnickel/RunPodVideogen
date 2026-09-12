@@ -210,6 +210,171 @@ body {
   transform: translateY(-1px);
 }
 
+/* Workflow Stepper & Live Guidance Bar */
+.workflow-card {
+  padding: 10px 16px;
+  gap: 8px;
+}
+
+.workflow-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  opacity: 0.35;
+  transition: all 0.3s ease;
+}
+.step-item.active {
+  opacity: 1;
+}
+.step-item.done {
+  opacity: 0.85;
+}
+
+.step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.step-item.active .step-num {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+  box-shadow: 0 0 10px var(--primary-glow);
+  animation: pulse-step 1.8s infinite;
+}
+.step-item.done .step-num {
+  background: var(--success);
+  border-color: var(--success);
+  color: #fff;
+}
+
+@keyframes pulse-step {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); box-shadow: 0 0 14px var(--primary-glow); }
+}
+
+.step-text {
+  display: flex;
+  flex-direction: column;
+}
+.step-name {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+.step-status {
+  font-size: 0.66rem;
+  color: var(--text-dim);
+}
+
+.step-line {
+  flex: 1;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  margin: 0 10px;
+  border-radius: 2px;
+  transition: background 0.3s ease;
+}
+.step-line.done {
+  background: var(--success);
+}
+.step-line.active {
+  background: linear-gradient(90deg, var(--success) 0%, var(--primary) 100%);
+}
+
+/* Guidance Banner */
+.guidance-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  gap: 10px;
+  transition: all 0.3s ease;
+}
+.guidance-banner.warning {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.guidance-banner.error {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.guidance-banner.success {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.guidance-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.guidance-icon {
+  font-size: 1rem;
+}
+.guidance-message {
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+.guidance-btn-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.guidance-btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  border: none;
+  cursor: pointer;
+  background: var(--primary);
+  color: #fff;
+  transition: all var(--transition-speed);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.guidance-btn:hover {
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+}
+.guidance-btn.btn-secondary {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-main);
+  border: 1px solid var(--border-color);
+}
+.guidance-btn.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+.step-item.error .step-num {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  animation: pulse-step 1.2s infinite;
+}
+
 /* Dashboard Rows */
 .dashboard-row {
   display: grid;

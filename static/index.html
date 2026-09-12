@@ -43,6 +43,57 @@
       </div>
     </header>
 
+    <!-- Interactive Workflow Stepper & Live Guidance Bar -->
+    <section class="card compact-card workflow-card">
+      <div class="workflow-stepper">
+        <div class="step-item active" id="step1">
+          <div class="step-num">1</div>
+          <div class="step-text">
+            <span class="step-name">Pod Buchen</span>
+            <span class="step-status" id="step1Status">GPU zuweisen</span>
+          </div>
+        </div>
+        <div class="step-line" id="line1"></div>
+
+        <div class="step-item" id="step2">
+          <div class="step-num">2</div>
+          <div class="step-text">
+            <span class="step-name">Wan2GP Setup</span>
+            <span class="step-status" id="step2Status">Container & Caches</span>
+          </div>
+        </div>
+        <div class="step-line" id="line2"></div>
+
+        <div class="step-item" id="step3">
+          <div class="step-num">3</div>
+          <div class="step-text">
+            <span class="step-name">WebUI & Generieren</span>
+            <span class="step-status" id="step3Status">MiniMax H3 Prompt</span>
+          </div>
+        </div>
+        <div class="step-line" id="line3"></div>
+
+        <div class="step-item" id="step4">
+          <div class="step-num">4</div>
+          <div class="step-text">
+            <span class="step-name">Auto-Download</span>
+            <span class="step-status" id="step4Status">Video in Galerie</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Contextual Guidance Banner -->
+      <div class="guidance-banner info" id="guidanceBanner">
+        <div class="guidance-main">
+          <span class="guidance-icon" id="guidanceIcon">💡</span>
+          <div class="guidance-message">
+            <b id="guidanceTitle">Nächster Schritt:</b> <span id="guidanceDesc">Wähle links deine GPU und klicke auf „🚀 Pod Starten“.</span>
+          </div>
+        </div>
+        <div class="guidance-btn-container" id="guidanceAction"></div>
+      </div>
+    </section>
+
     <!-- Row 1: Mission Control & Kosten-Cockpit -->
     <div class="dashboard-row top-row">
 

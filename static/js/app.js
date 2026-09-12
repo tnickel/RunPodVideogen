@@ -18,6 +18,25 @@ document.addEventListener("DOMContentLoaded", () => {
   const cockpitRunTimeRemaining = document.getElementById("cockpitRunTimeRemaining");
   const displayBalance = document.getElementById("displayBalance");
 
+  // Workflow Stepper & Guidance Elements
+  const step1 = document.getElementById("step1");
+  const step2 = document.getElementById("step2");
+  const step3 = document.getElementById("step3");
+  const step4 = document.getElementById("step4");
+  const step1Status = document.getElementById("step1Status");
+  const step2Status = document.getElementById("step2Status");
+  const step3Status = document.getElementById("step3Status");
+  const step4Status = document.getElementById("step4Status");
+  const line1 = document.getElementById("line1");
+  const line2 = document.getElementById("line2");
+  const line3 = document.getElementById("line3");
+
+  const guidanceBanner = document.getElementById("guidanceBanner");
+  const guidanceIcon = document.getElementById("guidanceIcon");
+  const guidanceTitle = document.getElementById("guidanceTitle");
+  const guidanceDesc = document.getElementById("guidanceDesc");
+  const guidanceAction = document.getElementById("guidanceAction");
+
   // Header & Status Elements
   const statusPill = document.getElementById("statusPill");
   const statusText = document.getElementById("statusText");
@@ -284,8 +303,203 @@ document.addEventListener("DOMContentLoaded", () => {
         btnOpenWebUI.disabled = true;
       }
 
+      // Update Step-by-Step Guidance & Stepper
+      updateWorkflowGuidance(data);
+
     } catch (err) {
       console.error("Status fetch error:", err);
+    }
+  }
+
+  // Dynamic Workflow Guidance & Stepper
+  function updateWorkflowGuidance(data) {
+    const status = data.status;
+    const detail = data.status_detail || "";
+
+    // Reset lines
+    if (line1) line1.className = "step-line";
+    if (line2) line2.className = "step-line";
+    if (line3) line3.className = "step-line";
+
+    if (status === "ERROR") {
+      const isOutOfStock = detail.toLowerCase().includes("no longer any instances available") ||
+                           detail.toLowerCase().includes("ausgebucht") ||
+                           (data.recent_logs && data.recent_logs.some(l => l.toLowerCase().includes("no longer any instances available")));
+
+      if (step1) {
+        step1.className = "step-item active error";
+        if (step1Status) step1Status.textContent = isOutOfStock ? "GPU vergriffen" : "Fehler";
+      }
+      if (step2) { step2.className = "step-item"; if (step2Status) step2Status.textContent = "Wartet..."; }
+      if (step3) { step3.className = "step-item"; if (step3Status) step3Status.textContent = "Wartet..."; }
+      if (step4) { step4.className = "step-item"; if (step4Status) step4Status.textContent = "Wartet..."; }
+
+      if (guidanceBanner) guidanceBanner.className = "guidance-banner error";
+      if (guidanceIcon) guidanceIcon.textContent = "⚠️";
+
+      if (isOutOfStock) {
+        if (guidanceTitle) guidanceTitle.textContent = "Start abgebrochen: RTX 4090 aktuell ausgebucht!";
+        if (guidanceDesc) guidanceDesc.textContent = "In der Community Cloud ist die 4090 gerade belegt (0€ Kosten). Wechsle direkt auf die NVIDIA A40 (48 GB VRAM, ~$0.35/h, doppelt so viel VRAM!) oder versuche Secure Cloud:";
+        if (guidanceAction) {
+          guidanceAction.innerHTML = `
+            <button class="guidance-btn" id="btnGuidanceA40">👉 Auf A40 (48GB) wechseln & Starten</button>
+            <button class="guidance-btn btn-secondary" id="btnGuidanceSecure">🔒 Secure Cloud versuchen</button>
+            <button class="guidance-btn btn-secondary" id="btnGuidanceRetry">🔄 Nochmal versuchen</button>
+          `;
+
+          document.getElementById("btnGuidanceA40")?.addEventListener("click", async () => {
+            gpuSelect.value = "NVIDIA A40";
+            await fetch("/api/config", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ gpu_type_id: "NVIDIA A40" })
+            });
+            btnStart.click();
+          });
+
+          document.getElementById("btnGuidanceSecure")?.addEventListener("click", async () => {
+            cloudTypeSelect.value = "SECURE";
+            await fetch("/api/config", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ cloud_type: "SECURE" })
+            });
+            btnStart.click();
+          });
+
+          document.getElementById("btnGuidanceRetry")?.addEventListener("click", () => {
+            btnStart.click();
+          });
+        }
+      } else {
+        if (guidanceTitle) guidanceTitle.textContent = "Fehler aufgetreten:";
+        if (guidanceDesc) guidanceDesc.textContent = detail || "Fehler beim Starten. Bitte Terminal prüfen.";
+        if (guidanceAction) {
+          guidanceAction.innerHTML = `<button class="guidance-btn" id="btnGuidanceRetry">🔄 Erneut versuchen</button>`;
+          document.getElementById("btnGuidanceRetry")?.addEventListener("click", () => {
+            btnStart.click();
+          });
+        }
+      }
+
+    } else if (status === "STARTING") {
+      if (step1) {
+        step1.className = "step-item active";
+        if (step1Status) step1Status.textContent = "GPU wird gebucht...";
+      }
+      if (line1) line1.className = "step-line active";
+      if (step2) { step2.className = "step-item"; if (step2Status) step2Status.textContent = "Wartet..."; }
+      if (step3) { step3.className = "step-item"; if (step3Status) step3Status.textContent = "Wartet..."; }
+      if (step4) { step4.className = "step-item"; if (step4Status) step4Status.textContent = "Wartet..."; }
+
+      if (guidanceBanner) guidanceBanner.className = "guidance-banner info";
+      if (guidanceIcon) guidanceIcon.textContent = "⏳";
+      if (guidanceTitle) guidanceTitle.textContent = "Schritt 1 von 4: Pod wird bereitgestellt...";
+      if (guidanceDesc) guidanceDesc.textContent = "RunPod weist die GPU zu und startet den PyTorch-Container (ca. 30–60 Sek.). Bitte kurz warten...";
+      if (guidanceAction) guidanceAction.innerHTML = `<span style="font-size:0.75rem; color:var(--primary); font-weight:700;">⏳ Cloud-Provisionierung läuft...</span>`;
+
+    } else if (status === "BOOTSTRAPPING") {
+      if (step1) {
+        step1.className = "step-item done";
+        if (step1Status) step1Status.textContent = "Pod gebucht ✓";
+      }
+      if (line1) line1.className = "step-line done";
+      if (step2) {
+        step2.className = "step-item active";
+        if (step2Status) step2Status.textContent = "Wan2GP & Modell-Setup...";
+      }
+      if (line2) line2.className = "step-line active";
+      if (step3) { step3.className = "step-item"; if (step3Status) step3Status.textContent = "Wartet..."; }
+      if (step4) { step4.className = "step-item"; if (step4Status) step4Status.textContent = "Wartet..."; }
+
+      if (guidanceBanner) guidanceBanner.className = "guidance-banner info";
+      if (guidanceIcon) guidanceIcon.textContent = "⚙️";
+      if (guidanceTitle) guidanceTitle.textContent = "Schritt 2 von 4: Wan2GP & MiniMax H3 Modell einrichten...";
+      if (guidanceDesc) guidanceDesc.textContent = "Container verbunden! Wan2GP wird eingerichtet. Beim 1. Mal werden Basisdateien auf dein Volume geladen. Siehe Terminal unten für Live-Logs:";
+      if (guidanceAction) {
+        guidanceAction.innerHTML = `<button class="guidance-btn" id="btnGuidanceScrollTerm">💻 Terminal öffnen</button>`;
+        document.getElementById("btnGuidanceScrollTerm")?.addEventListener("click", () => {
+          terminalLog.scrollIntoView({ behavior: "smooth" });
+          terminalLog.style.borderColor = "var(--primary)";
+          setTimeout(() => terminalLog.style.borderColor = "", 1500);
+        });
+      }
+
+    } else if (status === "RUNNING") {
+      if (step1) {
+        step1.className = "step-item done";
+        if (step1Status) step1Status.textContent = "Pod gebucht ✓";
+      }
+      if (line1) line1.className = "step-line done";
+      if (step2) {
+        step2.className = "step-item done";
+        if (step2Status) step2Status.textContent = "Wan2GP bereit ✓";
+      }
+      if (line2) line2.className = "step-line done";
+      if (step3) {
+        step3.className = "step-item active";
+        if (step3Status) step3Status.textContent = "WebUI online!";
+      }
+      if (line3) line3.className = "step-line active";
+      if (step4) {
+        step4.className = "step-item active";
+        if (step4Status) step4Status.textContent = "Auto-Download aktiv";
+      }
+
+      if (guidanceBanner) guidanceBanner.className = "guidance-banner success";
+      if (guidanceIcon) guidanceIcon.textContent = "🎉";
+      if (guidanceTitle) guidanceTitle.textContent = "Schritt 3 von 4: Wan2GP WebUI ist online!";
+      if (guidanceDesc) guidanceDesc.textContent = "Klicke jetzt auf 'WebUI öffnen' und erstelle dein Video mit MiniMax H3. Wenn du fertig bist: Klicke links auf 'GPU Pausieren', um GPU-Kosten auf 0 € zu stoppen!";
+      if (guidanceAction) {
+        guidanceAction.innerHTML = `<button class="guidance-btn" id="btnGuidanceOpenWebUI" style="background:var(--success); color:#022c22; font-weight:800;">🌐 Wan2GP WebUI öffnen</button>`;
+        document.getElementById("btnGuidanceOpenWebUI")?.addEventListener("click", () => {
+          if (activeProxyUrl) window.open(activeProxyUrl, "_blank");
+          else alert("Proxy-URL noch nicht bereit, bitte wenige Sekunden warten.");
+        });
+      }
+
+    } else if (status === "STOPPED") {
+      if (step1) {
+        step1.className = "step-item active";
+        if (step1Status) step1Status.textContent = "Pausiert (0€ GPU)";
+      }
+      if (step2) {
+        step2.className = "step-item done";
+        if (step2Status) step2Status.textContent = "Modelle gesichert ✓";
+      }
+      if (step3) { step3.className = "step-item"; if (step3Status) step3Status.textContent = "Bereit für Start"; }
+      if (step4) { step4.className = "step-item"; if (step4Status) step4Status.textContent = "Bereit"; }
+
+      if (guidanceBanner) guidanceBanner.className = "guidance-banner warning";
+      if (guidanceIcon) guidanceIcon.textContent = "🟡";
+      if (guidanceTitle) guidanceTitle.textContent = "Standby aktiv (GPU aus, 30 GB Modelle erhalten):";
+      if (guidanceDesc) guidanceDesc.textContent = "GPU ist aus (0,00 $/h). Deine 30 GB MiniMax H3 Modelle liegen sicher auf der Cloud-Platte (~17¢/Tag). Klicke auf 'Pod Aufwecken', um in 45s weiterzuarbeiten:";
+      if (guidanceAction) {
+        guidanceAction.innerHTML = `<button class="guidance-btn" id="btnGuidanceResume" style="background:var(--warning); color:#451a03; font-weight:800;">⚡ Pod Aufwecken (Resume)</button>`;
+        document.getElementById("btnGuidanceResume")?.addEventListener("click", () => {
+          btnStart.click();
+        });
+      }
+
+    } else { // OFFLINE, TERMINATED
+      if (step1) {
+        step1.className = "step-item active";
+        if (step1Status) step1Status.textContent = "GPU wählen";
+      }
+      if (step2) { step2.className = "step-item"; if (step2Status) step2Status.textContent = "Noch nicht gestartet"; }
+      if (step3) { step3.className = "step-item"; if (step3Status) step3Status.textContent = "Noch nicht gestartet"; }
+      if (step4) { step4.className = "step-item"; if (step4Status) step4Status.textContent = "Noch nicht gestartet"; }
+
+      if (guidanceBanner) guidanceBanner.className = "guidance-banner info";
+      if (guidanceIcon) guidanceIcon.textContent = "💡";
+      if (guidanceTitle) guidanceTitle.textContent = "Schritt 1 von 4: Pod buchen & starten";
+      if (guidanceDesc) guidanceDesc.textContent = "Wähle links deine GPU (Tipp: NVIDIA A40 mit 48 GB VRAM für 0,35 $/h ist sofort frei) und klicke auf '🚀 Pod Starten'.";
+      if (guidanceAction) {
+        guidanceAction.innerHTML = `<button class="guidance-btn" id="btnGuidanceStart">🚀 Pod Starten</button>`;
+        document.getElementById("btnGuidanceStart")?.addEventListener("click", () => {
+          btnStart.click();
+        });
+      }
     }
   }
 

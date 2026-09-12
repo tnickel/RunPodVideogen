@@ -216,10 +216,15 @@ class PodOrchestrator:
             self.log(f"Wan2GP erfolgreich gestartet! Bereit unter {self.proxy_url}")
 
         except Exception as e:
-            self.log(f"Fehler beim Starten des Pods: {e}", level="ERROR")
+            err_msg = str(e)
+            self.log(f"Fehler beim Starten des Pods: {err_msg}", level="ERROR")
+            friendly_hint = err_msg
+            if "no longer any instances available" in err_msg.lower():
+                friendly_hint = "Die gewählte GPU ist in der Community Cloud gerade ausgebucht. Tipp: Wähle 'NVIDIA A40' (48 GB VRAM, ~$0.35/h) oder schalte auf 'Secure Cloud' um und klicke erneut auf 'Pod Starten'."
+                self.log(friendly_hint, level="WARNING")
             with self.lock:
                 self.status = "ERROR"
-                self.status_detail = str(e)
+                self.status_detail = friendly_hint
             update_config({"active_pod_status": "ERROR"})
 
     def _bootstrap_wan2gp(self, ip: str, port: int):
@@ -257,6 +262,25 @@ class PodOrchestrator:
             echo "[BOOTSTRAP] Wan2GP bereits auf Volume vorhanden."
         fi
 
+        # Triton Compatibility Patch for RunPod PyTorch Container:
+        # Wan2GP uses do_not_specialize_on_alignment which is only in Triton 3.2+
+        python3 -c "
+import triton
+p = triton.__file__
+with open(p, 'r') as f:
+    s = f.read()
+if '_compatible_jit' not in s:
+    wrapper = '''
+_orig_jit = jit
+def _compatible_jit(*args, **kwargs):
+    kwargs.pop('do_not_specialize_on_alignment', None)
+    return _orig_jit(*args, **kwargs)
+jit = _compatible_jit
+'''
+    with open(p, 'a') as f:
+        f.write('\\n' + wrapper + '\\n')
+" 2>/dev/null || true
+
         mkdir -p /workspace/Wan2GP/outputs
         mkdir -p /workspace/Wan2GP/ckpts
 
@@ -266,8 +290,8 @@ class PodOrchestrator:
         else
             echo "[BOOTSTRAP] Starte Wan2GP WebUI auf Port 7860..."
             cd /workspace/Wan2GP
-            nohup python wgp.py --server_port 7860 --server_name 0.0.0.0 > /workspace/wan2gp.log 2>&1 &
-            sleep 3
+            nohup python wgp.py --server-port 7860 --server-name 0.0.0.0 </dev/null > /workspace/wan2gp.log 2>&1 &
+            sleep 4
         fi
         """
         code, out, err = ssh.exec_command(bootstrap_script, timeout=300)

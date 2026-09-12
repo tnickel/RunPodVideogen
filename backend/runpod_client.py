@@ -160,11 +160,8 @@ class RunPodClient:
             "env": env_vars
         }
 
-        # Use runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04 by default
-        if template_id:
-            input_payload["templateId"] = template_id
-        else:
-            input_payload["imageName"] = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+        # Use runpod-torch-v240 (PyTorch 2.4 / CUDA 12.4) by default
+        input_payload["templateId"] = template_id if template_id else "runpod-torch-v240"
 
         data = self._request(query, {"input": input_payload})
         pod_info = data.get("podFindAndDeployOnDemand", {})
