@@ -1,12 +1,30 @@
 // RunPod VideoGen Studio Frontend Controller
 
 document.addEventListener("DOMContentLoaded", () => {
-  // Elements
+  // Ampel & Cost Cockpit Elements
+  const costCockpitCard = document.querySelector(".cost-cockpit-card");
+  const ampelRed = document.getElementById("ampelRed");
+  const ampelYellow = document.getElementById("ampelYellow");
+  const ampelGreen = document.getElementById("ampelGreen");
+
+  const ampelStatusTag = document.getElementById("ampelStatusTag");
+  const ampelHeadline = document.getElementById("ampelHeadline");
+  const ampelDesc = document.getElementById("ampelDesc");
+
+  const cockpitHourlyRate = document.getElementById("cockpitHourlyRate");
+  const cockpitDailyRate = document.getElementById("cockpitDailyRate");
+  const cockpitWeeklyRate = document.getElementById("cockpitWeeklyRate");
+  const cockpitDiskMonthly = document.getElementById("cockpitDiskMonthly");
+  const cockpitRunTimeRemaining = document.getElementById("cockpitRunTimeRemaining");
+  const displayBalance = document.getElementById("displayBalance");
+
+  // Header & Status Elements
   const statusPill = document.getElementById("statusPill");
   const statusText = document.getElementById("statusText");
   const accountEmail = document.getElementById("accountEmail");
   const podDetailStatus = document.getElementById("podDetailStatus");
 
+  // Action Buttons
   const btnStart = document.getElementById("btnStart");
   const btnPause = document.getElementById("btnPause");
   const btnTerminate = document.getElementById("btnTerminate");
@@ -45,6 +63,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const saveSettingsBtn = document.getElementById("saveSettingsBtn");
   const cfgApiKey = document.getElementById("cfgApiKey");
   const cfgEmail = document.getElementById("cfgEmail");
+  const cfgBalance = document.getElementById("cfgBalance");
 
   const videoModal = document.getElementById("videoModal");
   const closeVideoModalBtn = document.getElementById("closeVideoModalBtn");
@@ -58,6 +77,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentHourlyRate = 0.34;
   let timerInterval = null;
   let activeProxyUrl = null;
+  let currentBalance = 18.74;
 
   // Format Seconds to HH:MM:SS
   function formatTime(seconds) {
@@ -77,7 +97,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Fetch Status
+  // Fetch Status & Update Cockpit
   async function fetchStatus() {
     try {
       const res = await fetch("/api/status");
@@ -89,16 +109,100 @@ document.addEventListener("DOMContentLoaded", () => {
       statusText.textContent = data.status;
       podDetailStatus.textContent = data.status_detail || data.status;
 
-      // Account
-      if (data.account && data.account.email) {
-        accountEmail.textContent = data.account.email;
-        cfgEmail.value = data.account.email;
+      // Account & Balance
+      if (data.account) {
+        if (data.account.email) {
+          accountEmail.textContent = data.account.email;
+          cfgEmail.value = data.account.email;
+        }
+        if (data.account.balance !== undefined) {
+          currentBalance = parseFloat(data.account.balance);
+          displayBalance.textContent = currentBalance.toFixed(2);
+          cfgBalance.value = currentBalance.toFixed(2);
+        }
       }
 
-      // Cost & Timer
+      // Cost Calculation Variables
       currentHourlyRate = data.hourly_rate || 0.34;
       hourlyRateDisplay.textContent = `$${currentHourlyRate.toFixed(2)} /h`;
       
+      const volumeGb = data.config && data.config.volume_disk_gb ? data.config.volume_disk_gb : 75;
+      const diskMonthly = volumeGb * 0.07; // RunPod storage: $0.07/GB/mo (~$5.25 for 75GB)
+      const diskDaily = diskMonthly / 30.0; // ~$0.175 / day
+      const diskWeekly = diskDaily * 7.0; // ~$1.225 / week
+      const diskHourly = diskMonthly / 720.0; // ~$0.00729 / h
+
+      const status = data.status;
+
+      // ==========================================
+      // AMPELSYSTEM & DICKE STATUSANZEIGE
+      // ==========================================
+      if (status === "RUNNING" || status === "STARTING" || status === "BOOTSTRAPPING") {
+        // 🔴 ROT: GPU Aktiv
+        ampelRed.classList.add("active");
+        ampelYellow.classList.remove("active");
+        ampelGreen.classList.remove("active");
+        if (costCockpitCard) costCockpitCard.className = "card cost-cockpit-card state-red";
+
+        ampelStatusTag.className = "ampel-status-tag red";
+        ampelStatusTag.textContent = "🔴 GPU AKTIV – RECHENZEIT LÄUFT";
+        ampelHeadline.textContent = "GPU rechnet aktuell";
+        ampelDesc.textContent = "Die Grafikkarte ist eingeschaltet und rechnet. Pausiere den Pod mit 'GPU Pausieren', sobald deine Videos generiert sind, um GPU-Kosten zu stoppen.";
+
+        const totalHourly = currentHourlyRate + diskHourly;
+        const totalDaily = (currentHourlyRate * 24) + diskDaily;
+        const totalWeekly = (currentHourlyRate * 168) + diskWeekly;
+
+        cockpitHourlyRate.innerHTML = `$${totalHourly.toFixed(3)} <span class="rate-unit">/ Std.</span>`;
+        cockpitDailyRate.textContent = `$${totalDaily.toFixed(2)}`;
+        cockpitWeeklyRate.textContent = `$${totalWeekly.toFixed(2)}`;
+        cockpitDiskMonthly.textContent = `$${diskMonthly.toFixed(2)}`;
+
+        const hoursLeft = currentHourlyRate > 0 ? (currentBalance / currentHourlyRate).toFixed(1) : "0";
+        cockpitRunTimeRemaining.textContent = `~${hoursLeft}h GPU`;
+
+      } else if (status === "STOPPED" || data.pod_id) {
+        // 🟡 GELB: Standby (GPU aus, Modelle erhalten)
+        ampelRed.classList.remove("active");
+        ampelYellow.classList.add("active");
+        ampelGreen.classList.remove("active");
+        if (costCockpitCard) costCockpitCard.className = "card cost-cockpit-card state-yellow";
+
+        ampelStatusTag.className = "ampel-status-tag yellow";
+        ampelStatusTag.textContent = "🟡 STANDBY (GPU AUS, 30GB MODELLE ERHALTEN)";
+        ampelHeadline.textContent = "GPU pausiert (0,00 € GPU-Kosten)";
+        ampelDesc.textContent = `GPU ist abgeschaltet (0,00 $/h). Deine 30 GB MiniMax H3 Modellgewichte bleiben auf der ${volumeGb} GB Cloud-Platte gespeichert (~${(diskDaily * 100).toFixed(0)}¢/Tag), sodass du beim nächsten Klick sofort in 45s startklar bist!`;
+
+        cockpitHourlyRate.innerHTML = `$${diskHourly.toFixed(3)} <span class="rate-unit">/ Std.</span>`;
+        cockpitDailyRate.textContent = `$${diskDaily.toFixed(2)}`;
+        cockpitWeeklyRate.textContent = `$${diskWeekly.toFixed(2)}`;
+        cockpitDiskMonthly.textContent = `$${diskMonthly.toFixed(2)}`;
+
+        const daysLeft = diskDaily > 0 ? (currentBalance / diskDaily).toFixed(0) : "0";
+        cockpitRunTimeRemaining.textContent = `~${daysLeft} Tage Standby`;
+
+      } else {
+        // 🟢 GRÜN: Null-Kosten (Aus & Gelöscht)
+        ampelRed.classList.remove("active");
+        ampelYellow.classList.remove("active");
+        ampelGreen.classList.add("active");
+        if (costCockpitCard) costCockpitCard.className = "card cost-cockpit-card state-green";
+
+        ampelStatusTag.className = "ampel-status-tag green";
+        ampelStatusTag.textContent = "🟢 0,- € NULL-KOSTEN MODUS";
+        ampelHeadline.textContent = "Keine laufenden Kosten";
+        ampelDesc.textContent = "Es ist aktuell kein Pod aktiv und kein Cloud-Speicher reserviert. Dein Guthaben bleibt zu 100% unangetastet.";
+
+        cockpitHourlyRate.innerHTML = `$0.000 <span class="rate-unit">/ Std.</span>`;
+        cockpitDailyRate.textContent = "$0.00";
+        cockpitWeeklyRate.textContent = "$0.00";
+        cockpitDiskMonthly.textContent = "$0.00";
+
+        const potentialHours = currentHourlyRate > 0 ? (currentBalance / currentHourlyRate).toFixed(0) : "54";
+        cockpitRunTimeRemaining.textContent = `~${potentialHours}h GPU möglich`;
+      }
+
+      // Live Session Timer
       if (data.status === "RUNNING") {
         currentUptime = data.uptime_seconds || 0;
         sessionTimer.textContent = formatTime(currentUptime);
@@ -118,7 +222,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
 
-      // Standby Mode
+      // Standby Mode Switch
       if (data.standby_mode === "terminate") {
         modeTermBtn.classList.add("active");
         modeStopBtn.classList.remove("active");
@@ -168,7 +272,7 @@ document.addEventListener("DOMContentLoaded", () => {
         btnOpenWebUI.disabled = true;
       } else if (data.status === "STOPPED") {
         btnStart.disabled = false;
-        btnStart.innerHTML = "<span>⚡</span> Pod Aufwecken (Resume)";
+        btnStart.innerHTML = "<span>⚡</span> Pod Aufwecken (Resume 45s)";
         btnPause.disabled = true;
         btnTerminate.disabled = false;
         btnOpenWebUI.disabled = true;
@@ -300,7 +404,11 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnPause.addEventListener("click", async () => {
-    if (!confirm("GPU pausieren? Die GPU-Stundenkosten stoppen sofort. Die Festplatte bleibt für ~0,15$/Tag erhalten.")) return;
+    const msg = "GPU pausieren (Stop Pod)?\n\n" +
+                "✓ Die GPU-Stundenkosten stoppen sofort (0,00 $/h).\n" +
+                "✓ Deine 30 GB MiniMax H3 Modellgewichte bleiben auf der Cloud-Platte erhalten (~17¢/Tag).\n" +
+                "✓ Beim nächsten Start bist du in 45 Sekunden startklar!";
+    if (!confirm(msg)) return;
     try {
       const res = await fetch("/api/pod/stop", { method: "POST" });
       const data = await res.json();
@@ -312,7 +420,13 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnTerminate.addEventListener("click", async () => {
-    if (!confirm("ACHTUNG: Pod vollständig terminieren (löschen)?\n\n- Standby-Kosten sinken auf exakt 0,00 €.\n- Das Cloud-Volume wird gelöscht.\n- Beim nächsten Start müssen Modelle neu geladen werden (~6 Min).")) return;
+    const msg = "⚠️ ACHTUNG: POD WIRKLICH UNWIDERRUFLICH LÖSCHEN?\n\n" +
+                "• Die Standby-Kosten sinken auf exakt 0,00 €.\n" +
+                "• ABER: Das gesamte Cloud-Volume und die 30 GB heruntergeladenen MiniMax H3 Modellgewichte werden GELÖSCHT!\n" +
+                "• Beim nächsten Start müssen alle 30 GB Modelle neu heruntergeladen werden (~6 Minuten Bootzeit).\n\n" +
+                "TIPP: Normalerweise reicht 'GPU Pausieren' völlig aus, um die GPU-Kosten zu stoppen und die Modelle zu behalten.\n\n" +
+                "Möchtest du den Pod trotzdem endgültig löschen?";
+    if (!confirm(msg)) return;
     try {
       const res = await fetch("/api/pod/terminate", { method: "POST" });
       const data = await res.json();
@@ -395,6 +509,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const cfg = await res.json();
         cfgApiKey.value = cfg.runpod_api_key || "";
         cfgEmail.value = cfg.account_email || "";
+        cfgBalance.value = (cfg.account_balance || currentBalance).toFixed(2);
       }
     } catch (_) {}
     settingsModal.classList.add("active");
@@ -413,10 +528,11 @@ document.addEventListener("DOMContentLoaded", () => {
       alert("API Key darf nicht leer sein.");
       return;
     }
+    const bal = parseFloat(cfgBalance.value) || currentBalance;
     await fetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ runpod_api_key: key })
+      body: JSON.stringify({ runpod_api_key: key, account_balance: bal })
     });
     closeSettings();
     fetchStatus();

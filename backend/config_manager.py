@@ -9,6 +9,7 @@ _lock = threading.Lock()
 DEFAULT_CONFIG = {
     "runpod_api_key": "",
     "account_email": "",
+    "account_balance": 18.74,
     "active_pod_id": None,
     "active_pod_status": "OFFLINE",
     "gpu_type_id": "NVIDIA GeForce RTX 4090",

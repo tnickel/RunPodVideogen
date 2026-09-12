@@ -60,6 +60,7 @@ class ConfigUpdateModel(BaseModel):
     standby_mode: str | None = None
     auto_shutdown_minutes: int | None = None
     auto_sync_videos: bool | None = None
+    account_balance: float | None = None
 
 # Routes
 @app.get("/api/status")
@@ -68,10 +69,13 @@ def get_status():
     cfg = load_config()
     client = orchestrator.get_client()
     
-    account_info = {"email": cfg.get("account_email", "")}
+    account_info = {
+        "email": cfg.get("account_email", ""),
+        "balance": float(cfg.get("account_balance", 18.74))
+    }
     try:
         user = client.get_myself()
-        if user:
+        if user and "email" in user:
             account_info["email"] = user.get("email", account_info["email"])
     except Exception:
         pass

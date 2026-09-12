@@ -294,12 +294,8 @@ class PodOrchestrator:
                 if auto_shut > 0:
                     idle_seconds = now - self.last_activity_time
                     if idle_seconds > (auto_shut * 60):
-                        mode = cfg.get("standby_mode", "stop")
-                        self.log(f"Auto-Shutdown: {auto_shut} Minuten Inaktivität erreicht! Schalte Pod ab ({mode})...", level="WARNING")
-                        if mode == "terminate":
-                            self.terminate_pod()
-                        else:
-                            self.stop_pod()
+                        self.log(f"Auto-Shutdown: {auto_shut} Minuten Inaktivität erreicht! Pausiere GPU (Stop Pod - 30 GB Modelle bleiben auf Platte erhalten)...", level="WARNING")
+                        self.stop_pod()
 
                 # Sync Videos every ~15 seconds
                 sync_counter += 2

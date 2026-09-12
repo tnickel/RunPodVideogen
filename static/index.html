@@ -43,6 +43,59 @@
   <!-- Main Grid -->
   <main class="dashboard-grid">
 
+    <!-- Top Hero Card: Ampelsystem & Kosten-Cockpit -->
+    <section class="card cost-cockpit-card">
+      <div class="cost-cockpit-grid">
+        
+        <!-- Left: Ampel & Status -->
+        <div class="ampel-section">
+          <div class="ampel-housing">
+            <div id="ampelRed" class="ampel-lamp red" title="GPU Aktiv (Kosten laufen)"></div>
+            <div id="ampelYellow" class="ampel-lamp yellow" title="Standby (GPU aus, Modelle erhalten)"></div>
+            <div id="ampelGreen" class="ampel-lamp green active" title="0,- € Modus (Aus & Gelöscht)"></div>
+          </div>
+          <div class="ampel-status-info">
+            <div class="ampel-status-tag green" id="ampelStatusTag">🟢 0,- € NULL-KOSTEN MODUS</div>
+            <div class="ampel-headline" id="ampelHeadline">Keine laufenden Kosten</div>
+            <div class="ampel-desc" id="ampelDesc">
+              Es ist aktuell kein Pod aktiv und kein Cloud-Speicher reserviert. Dein Guthaben bleibt unangetastet.
+            </div>
+            <div class="safety-badge">
+              🛡️ <b>Schutz aktiv:</b> Beim Beenden wird der Pod <u>nur pausiert</u> (Stop). Die 30 GB Modelle bleiben erhalten. Löschen nur auf manuelle Anweisung!
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Dicke Statusanzeige & Hochrechnungen -->
+        <div class="cost-matrix-section">
+          <div class="main-rate-display">
+            <div class="main-rate-label">AKTUELLE KOSTEN-RATE</div>
+            <div class="main-rate-val" id="cockpitHourlyRate">$0.000 <span class="rate-unit">/ Std.</span></div>
+          </div>
+
+          <div class="projection-grid">
+            <div class="proj-box">
+              <div class="proj-label">PRO TAG (24H)</div>
+              <div class="proj-value" id="cockpitDailyRate">$0.00</div>
+            </div>
+            <div class="proj-box">
+              <div class="proj-label">PRO WOCHE (7 TAGE)</div>
+              <div class="proj-value" id="cockpitWeeklyRate">$0.00</div>
+            </div>
+            <div class="proj-box">
+              <div class="proj-label">PLATTE / MONAT</div>
+              <div class="proj-value" id="cockpitDiskMonthly">$0.00</div>
+            </div>
+            <div class="proj-box highlight-balance">
+              <div class="proj-label">GUTHABEN ($<span id="displayBalance">18.74</span>)</div>
+              <div class="proj-value" id="cockpitRunTimeRemaining">~55h GPU</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
     <!-- Card 1: Pod Control & Launchpad -->
     <section class="card">
       <div class="card-header">
@@ -58,10 +111,10 @@
           <span>🚀</span> Pod Starten
         </button>
         <button id="btnPause" class="btn-action btn-pause" disabled>
-          <span>⏸️</span> GPU Pausieren
+          <span>⏸️</span> GPU Pausieren (Stop)
         </button>
         <button id="btnTerminate" class="btn-action btn-danger" disabled>
-          <span>🛑</span> Beenden (0€)
+          <span>🗑️</span> Pod Löschen (0€)
         </button>
         <button id="btnRefresh" class="btn-action icon-btn">
           <span>🔄</span> Status prüfen
@@ -242,6 +295,11 @@
       <div class="form-group">
         <label class="form-label">Account E-Mail:</label>
         <input type="text" id="cfgEmail" class="form-input" readonly>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Aktuelles RunPod Guthaben ($ USD):</label>
+        <input type="number" step="0.01" id="cfgBalance" class="form-input" placeholder="18.74">
       </div>
 
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">

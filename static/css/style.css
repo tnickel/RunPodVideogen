@@ -212,6 +212,226 @@ body {
   }
 }
 
+/* Cost Cockpit & Traffic Light Hero */
+.cost-cockpit-card {
+  grid-column: span 2;
+  background: linear-gradient(135deg, rgba(18, 24, 38, 0.95) 0%, rgba(13, 18, 30, 0.98) 100%);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 24px 28px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  transition: border-color 0.4s ease, box-shadow 0.4s ease;
+}
+
+.cost-cockpit-card.state-green {
+  border-color: rgba(16, 185, 129, 0.35);
+  box-shadow: 0 0 35px rgba(16, 185, 129, 0.08);
+}
+.cost-cockpit-card.state-yellow {
+  border-color: rgba(245, 158, 11, 0.35);
+  box-shadow: 0 0 35px rgba(245, 158, 11, 0.08);
+}
+.cost-cockpit-card.state-red {
+  border-color: rgba(239, 68, 68, 0.45);
+  box-shadow: 0 0 45px rgba(239, 68, 68, 0.15);
+}
+
+.cost-cockpit-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 32px;
+  align-items: center;
+}
+
+@media (max-width: 1024px) {
+  .cost-cockpit-card {
+    grid-column: span 1;
+  }
+  .cost-cockpit-grid {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+}
+
+.ampel-section {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.ampel-housing {
+  background: #05070d;
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.9), 0 4px 16px rgba(0, 0, 0, 0.4);
+  flex-shrink: 0;
+}
+
+.ampel-lamp {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  opacity: 0.18;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.ampel-lamp.red { background: #ef4444; }
+.ampel-lamp.red.active {
+  opacity: 1;
+  box-shadow: 0 0 18px #ef4444, 0 0 35px rgba(239, 68, 68, 0.6);
+  animation: pulse-lamp 1.5s infinite;
+}
+
+.ampel-lamp.yellow { background: #f59e0b; }
+.ampel-lamp.yellow.active {
+  opacity: 1;
+  box-shadow: 0 0 18px #f59e0b, 0 0 35px rgba(245, 158, 11, 0.6);
+}
+
+.ampel-lamp.green { background: #10b981; }
+.ampel-lamp.green.active {
+  opacity: 1;
+  box-shadow: 0 0 18px #10b981, 0 0 35px rgba(16, 185, 129, 0.6);
+}
+
+@keyframes pulse-lamp {
+  0%, 100% { transform: scale(1); filter: brightness(1); }
+  50% { transform: scale(1.08); filter: brightness(1.25); }
+}
+
+.ampel-status-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.ampel-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+  align-self: flex-start;
+}
+
+.ampel-status-tag.green {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.ampel-status-tag.yellow {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.ampel-status-tag.red {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.ampel-headline {
+  font-size: 1.4rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 6px;
+  color: var(--text-main);
+}
+
+.ampel-desc {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin-bottom: 10px;
+}
+
+.safety-badge {
+  font-size: 0.78rem;
+  color: #a5b4fc;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  display: inline-block;
+}
+
+/* Cost Matrix Right Column */
+.cost-matrix-section {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 18px 22px;
+}
+
+.main-rate-display {
+  margin-bottom: 14px;
+}
+
+.main-rate-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.main-rate-val {
+  font-size: 2.3rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  color: #fff;
+  line-height: 1.1;
+}
+
+.rate-unit {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.projection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.proj-box {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+
+.proj-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
+.proj-value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+}
+
+.highlight-balance .proj-value {
+  color: #38bdf8;
+}
+
 .card {
   background: var(--bg-card);
   backdrop-filter: blur(16px);
