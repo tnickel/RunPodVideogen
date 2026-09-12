@@ -28,9 +28,12 @@
       </div>
 
       <div class="header-meta">
-        <div id="statusPill" class="status-pill OFFLINE">
-          <span class="status-indicator"></span>
-          <span id="statusText">OFFLINE</span>
+        <div class="status-wrap-header">
+          <div id="statusPill" class="status-pill OFFLINE">
+            <span class="status-indicator"></span>
+            <span id="statusText">OFFLINE</span>
+          </div>
+          <button id="btnHeaderCostInfo" class="header-info-circle-btn" type="button" title="Erklärung: Pause vs. Stop vs. Löschen">i</button>
         </div>
         <div class="account-pill" id="accountEmail">analyser2008@googlemail.com</div>
         <div class="balance-pill">
@@ -203,7 +206,13 @@
             </div>
 
             <div class="cockpit-status-meta">
-              <div class="ampel-status-tag green" id="ampelStatusTag">🟢 0,- € NULL-KOSTEN MODUS</div>
+              <div class="cockpit-status-tag-row">
+                <div class="ampel-status-tag green" id="ampelStatusTag">🟢 0,- € NULL-KOSTEN MODUS</div>
+                <button id="btnCockpitCostInfo" class="cockpit-info-btn" type="button" title="Klicken für Erklärung: Pause vs. Stop vs. Löschen">
+                  <span class="info-icon-circle">i</span>
+                  <span class="info-label">Info: Pause vs. Stop vs. Löschen</span>
+                </button>
+              </div>
               <div class="ampel-headline" id="ampelHeadline">Keine laufenden Kosten</div>
               <div class="ampel-desc" id="ampelDesc">
                 Es ist aktuell kein Pod aktiv und kein Cloud-Speicher reserviert. Dein Guthaben bleibt unangetastet.
@@ -355,6 +364,103 @@
             Herunterladen
           </a>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cost & Status Explanation Modal (Pause vs. Stop vs. Löschen) -->
+  <div class="modal-backdrop" id="costInfoModal">
+    <div class="modal-dialog info-modal-dialog">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <span class="modal-title-icon">ℹ️</span>
+          <div>
+            <h3 class="card-title">RunPod Status: Pause vs. Stop vs. Löschen</h3>
+            <span class="modal-subtitle">Technische Klärung, Kostenfaktoren und Best Practices</span>
+          </div>
+        </div>
+        <button class="close-btn" id="closeCostInfoModalBtn">&times;</button>
+      </div>
+
+      <div class="modal-body-scrollable">
+        <div class="info-highlight-box">
+          <div class="info-highlight-title">⚡ Kurzfassung auf den Punkt:</div>
+          <p>
+            <strong>Es gibt technisch überhaupt keinen Unterschied zwischen Pause und Stop.</strong><br>
+            In der RunPod-API existiert dafür nur ein einziger Befehl: <code>podStop</code>. 
+            Beide Begriffe meinen exakt dieselbe Funktion.
+          </p>
+          <p style="margin-top: 6px;">
+            Der <strong>entscheidende Unterschied</strong> liegt zwischen <strong>Pause / Stop (Standby)</strong> und <strong>Löschen (Terminate)</strong>:
+          </p>
+        </div>
+
+        <div class="comparison-table-wrapper">
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th style="width: 25%;">Kriterium</th>
+                <th style="width: 37.5%;" class="th-pause">⏸️ Pause / Stop (Standby)</th>
+                <th style="width: 37.5%;" class="th-terminate">🗑️ Löschen (Terminate)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Technischer RunPod-Befehl</strong></td>
+                <td><code class="code-pill">podStop</code></td>
+                <td><code class="code-pill">podTerminate</code></td>
+              </tr>
+              <tr>
+                <td><strong>GPU-Kosten</strong></td>
+                <td><strong class="text-green">0,00 $/h</strong> (stoppt sofort)</td>
+                <td><strong class="text-green">0,00 $/h</strong></td>
+              </tr>
+              <tr>
+                <td><strong>Speicherkosten</strong></td>
+                <td><strong>~0,17 $/Tag</strong> (~5,25 $/Mo für 75 GB)</td>
+                <td><strong class="text-green">0,00 €</strong> (absoluter Null-Kosten-Modus)</td>
+              </tr>
+              <tr>
+                <td><strong>30 GB Modellgewichte</strong></td>
+                <td><span class="badge-preserved">✓ Bleiben erhalten</span> auf <code>/workspace</code></td>
+                <td><span class="badge-deleted">✕ Unwiderruflich gelöscht</span></td>
+              </tr>
+              <tr>
+                <td><strong>Wiederanlaufzeit</strong></td>
+                <td><strong>~45 Sekunden</strong> („Pod Aufwecken“)</td>
+                <td><strong>~5–6 Minuten</strong> (muss alles neu herunterladen)</td>
+              </tr>
+              <tr>
+                <td><strong>Wann nutzen?</strong></td>
+                <td>Wenn du am selben Tag oder morgen weitergenerieren willst.</td>
+                <td>Wenn du das Projekt tagelang oder wochenlang nicht nutzt.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="info-cards-grid">
+          <div class="info-card-item">
+            <h4>💡 Warum heißt es in der App „GPU Pausieren (Stop)“?</h4>
+            <p>
+              In RunPod heißt der Befehl oft „Stop“. Weil Nutzer bei „Stop“ häufig befürchten, dass alles gelöscht wird, verwenden wir „GPU Pausieren“. Die teure A40-Grafikkarte wird abgeschaltet, aber deine fertig eingerichtete Umgebung und alle 30 GB heruntergeladenen Modelle bleiben für den nächsten Start eingefroren.
+            </p>
+          </div>
+
+          <div class="info-card-item">
+            <h4>💰 Wirtschaftliche Faustregel:</h4>
+            <p>
+              <strong>Unter der Woche / übers Wochenende:</strong> Immer <code>Pause</code> nutzen. Ein ganzes Wochenende Standby kostet nur ~35–50 Cent – dafür sparst du dir jedes Mal 6 Minuten Wartezeit und Netzwerk-Traffic.<br>
+              <strong>Längere Pause (Urlaub, Wochen):</strong> Klicke auf <code>Pod Löschen</code> für echte 0,00 € laufende Kosten.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer-custom">
+        <button id="closeCostInfoModalBtn2" class="btn-action btn-primary" style="padding: 8px 24px;">
+          Alles klar, verstanden
+        </button>
       </div>
     </div>
   </div>

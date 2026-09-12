@@ -98,6 +98,13 @@ document.addEventListener("DOMContentLoaded", () => {
   const modalDeleteBtn = document.getElementById("modalDeleteBtn");
   let currentModalFilename = "";
 
+  // Cost & Status Info Modal
+  const costInfoModal = document.getElementById("costInfoModal");
+  const btnHeaderCostInfo = document.getElementById("btnHeaderCostInfo");
+  const btnCockpitCostInfo = document.getElementById("btnCockpitCostInfo");
+  const closeCostInfoModalBtn = document.getElementById("closeCostInfoModalBtn");
+  const closeCostInfoModalBtn2 = document.getElementById("closeCostInfoModalBtn2");
+
   // Local State
   let currentUptime = 0;
   let currentHourlyRate = 0.34;
@@ -730,6 +737,33 @@ document.addEventListener("DOMContentLoaded", () => {
   closeVideoModalBtn.addEventListener("click", closeVideoModal);
   videoModal.addEventListener("click", (e) => {
     if (e.target === videoModal) closeVideoModal();
+  });
+
+  // Cost & Status Info Modal (Pause vs. Stop vs. Löschen)
+  function openCostInfoModal() {
+    if (costInfoModal) costInfoModal.classList.add("active");
+  }
+  function closeCostInfoModal() {
+    if (costInfoModal) costInfoModal.classList.remove("active");
+  }
+
+  if (btnHeaderCostInfo) btnHeaderCostInfo.addEventListener("click", openCostInfoModal);
+  if (btnCockpitCostInfo) btnCockpitCostInfo.addEventListener("click", openCostInfoModal);
+  if (closeCostInfoModalBtn) closeCostInfoModalBtn.addEventListener("click", closeCostInfoModal);
+  if (closeCostInfoModalBtn2) closeCostInfoModalBtn2.addEventListener("click", closeCostInfoModal);
+  if (costInfoModal) {
+    costInfoModal.addEventListener("click", (e) => {
+      if (e.target === costInfoModal) closeCostInfoModal();
+    });
+  }
+
+  // Close modals on Escape key
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeCostInfoModal();
+      closeVideoModal();
+      closeSettings();
+    }
   });
 
   // Action Button Listeners
