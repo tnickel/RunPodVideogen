@@ -94,13 +94,70 @@ Ziel ist es, bei jeder temporären Neu-Bereitstellung eines Pods eine vollständ
 
 ---
 
-## 2. Persistenz-Konzept (Zero-Reinstall)
+### Problem 6: „Connection to server lost. Reconnecting…“ trotz laufendem WanGP
 
-* **Mount-Punkt:** `/workspace` ist das einzige persistente Volume auf RunPod.
+Am 17.09.2026 bei WanGP v13.10 reproduziert: Die Startseite und Gradio-SSE
+antworteten, aber Browser-POSTs wurden mit `403: Cross-origin request rejected`
+abgewiesen. Auch der Deepy-WebSocket erhielt HTTP 403. Der RunPod-Proxy ersetzt
+den `Host` durch seine interne IP mit Port; die `Origin` des Browsers bleibt die
+öffentliche HTTPS-Adresse. WanGPs `same_origin()` verglich diese unterschiedlichen
+Adressen direkt. Ein `404: Session not found` im Gradio-Log war deshalb allein
+keine ausreichende Erklärung des sichtbaren Verbindungsfehlers.
+
+Der Bootstrap führt `scripts/patch_wan2gp_proxy.py` mit der konkreten öffentlichen
+Pod-Adresse aus. Der Patch ergänzt genau diese HTTPS-Origin; fremde Origins und
+andere Pod-Adressen bleiben abgewiesen. Er übernimmt keine Freigaben aus
+eingehenden Forwarded-Headern und verändert die Passwortprüfung nicht. Die
+Originaldatei wird einmalig als `web.py.runpod.bak` gesichert. Änderungen an einem
+bereits laufenden WanGP werden erst nach dessen Prozessneustart aktiv.
+
+Für den manuellen Bootstrap `bootstrap_pod.sh`, `patch_wan2gp_proxy.py` und
+`check_pod_cuda.py` nach `/workspace` kopieren und starten:
+
+```bash
+WANGP_PUBLIC_ORIGIN=https://POD_ID-7860.proxy.runpod.net bash /workspace/bootstrap_pod.sh
+```
+
+Die automatische Readiness-Prüfung prüft zusätzlich eine leere Queue-Anfrage mit
+der Browser-Origin. Erwartet wird HTTP 422 (fehlende Pflichtdaten), nicht HTTP 403;
+dabei wird kein Generierungsauftrag angelegt. Bei erfolgloser Startprüfung meldet
+das Dashboard einen Fehler und liest `/workspace/wan2gp.log` aus.
+
+### Problem 7: CUDA-Fehler trotz funktionierendem `nvidia-smi`
+
+Am 17.09.2026 ließ sich beim L40S-Pod `s28ajy08hp3s8s` die GPU auflisten,
+aber bereits `cuInit(0)` aus `libcuda.so.1` lieferte Fehler 999
+(`CUDA_ERROR_UNKNOWN`). Das Öffnen von `/dev/nvidia-uvm` scheiterte zusätzlich
+mit `EIO` / errno 5. Der Fehler trat damit auch unabhängig von WanGP und PyTorch
+auf; eine Neuinstallation von WanGP ist dafür keine begründete Lösung.
+
+Der Bootstrap prüft jetzt vor jeder Paketinstallation mit
+`scripts/check_pod_cuda.py` den Zugriff auf das UVM-Gerät und die
+CUDA-Treiberinitialisierung. Fehler erscheinen direkt im Dashboard. Das Skript
+verändert keine Geräte oder Treiber. Bei diesem Befund muss der GPU-Zugriff auf
+Host-/Container-Ebene wiederhergestellt werden; ein funktionierendes
+`nvidia-smi` allein genügt als Prüfung nicht.
+
+### Startfortschritt im Dashboard
+
+Der Start meldet die Phasen Buchung, Container, SSH/GPU-Prüfung, Installation
+und WebUI-Start. Installationsausgaben werden während des SSH-Kommandos
+übertragen. Die Anzeige enthält Phase, Laufzeit, letzte Meldung und deren Alter.
+Da Buchung und Paketinstallation keine verlässliche Gesamtmenge liefern, zeigt
+der Balken Aktivität ohne erfundene Prozentzahl oder Restzeit. Bei einem Fehler
+stoppt er und behält die letzte Meldung. Stoppen oder Löschen entwertet ältere
+Startaufträge, damit deren spätere Ergebnisse den aktuellen Zustand nicht
+überschreiben.
+
+---
+
+## 2. Persistenz beim Stoppen und Wiederaufnehmen
+
+* **Mount-Punkt:** In dieser Pod-Konfiguration liegt das persistente Pod-Volume unter `/workspace`.
 * **Wan2GP & Modell-Speicherort:** `/workspace/Wan2GP/` und `/workspace/.cache/huggingface/` liegen vollständig auf diesem Volume.
 * **Standby-Modus ("GPU Pausieren"):**  
-  Beim Klick auf *GPU Pausieren* wird `stop_pod` aufgerufen. Die GPU wird freigegeben (**0,00 $/h**), während das Volume erhalten bleibt (~17¢/Tag bei 75 GB).  
-  Beim erneuten Starten (`Resume`) sind alle Dateien und Modelle bereits vorhanden – die Startzeit verkürzt sich von ~6 Minuten auf ~30 Sekunden.
+  Beim Klick auf *GPU Pausieren* wird `stop_pod` aufgerufen. Die GPU wird freigegeben, während das Pod-Volume kostenpflichtig erhalten bleibt. Speichertarife sind in [cost_management.md](cost_management.md) beschrieben.
+  Beim erneuten Starten (`Resume`) bleiben Dateien und Modelle auf diesem Volume erhalten. Python-Pakete außerhalb des Volumes können fehlen; deshalb prüft der Bootstrap die Abhängigkeiten erneut. Eine feste Startdauer lässt sich daraus nicht ableiten.
 * **Terminieren (Pod Löschen):**  
   Wird nur auf expliziten Klick im Dashboard durchgeführt. Löscht das Volume unwiderruflich (0,00 € laufende Kosten).
 
@@ -110,13 +167,17 @@ Ziel ist es, bei jeder temporären Neu-Bereitstellung eines Pods eine vollständ
 
 Sollte der Pod jemals komplett gelöscht oder auf einem neuen Account/Provider aufgesetzt werden, fasst das Skript [`scripts/bootstrap_pod.sh`](file:///d:/AntiGravitySoftware/GitWorkspace/RunPodVideogen/scripts/bootstrap_pod.sh) alle Schritte zusammen:
 
-1. Verzeichnisse anlegen (`/workspace/.cache/huggingface`, `/workspace/Wan2GP/outputs`, `ckpts`)
-2. Wan2GP Repository klonen & `pip install -r requirements.txt`
-3. Triton-Patch anwenden (Problem 1)
-4. PyTorch 2.5 Buffer-Polyfill injizieren (Problem 5)
-5. WebUI im Hintergrund starten via `setsid` (Problem 2 & 3)
+1. GPU-Zugriff mit `check_pod_cuda.py` prüfen
+2. Verzeichnisse anlegen (`/workspace/.cache/huggingface`, `/workspace/Wan2GP/outputs`, `ckpts`)
+3. Wan2GP Repository bei Bedarf klonen und Abhängigkeiten mit `pip install -r requirements.txt` prüfen
+4. Triton-Patch und Buffer-Polyfill anwenden (Probleme 1 und 5)
+5. RunPod-Origin mit `patch_wan2gp_proxy.py` eintragen (Problem 6)
+6. WebUI im Hintergrund starten via `setsid` (Probleme 2 und 3)
 
-Dieses Skript wird vom Backend ([backend/orchestrator.py](file:///d:/AntiGravitySoftware/GitWorkspace/RunPodVideogen/backend/orchestrator.py)) bei jedem neuen Pod automatisch per SSH ausgeführt.
+Der automatische Start in `backend/orchestrator.py` enthält die entsprechende
+SSH-Bootstrap-Sequenz und bettet die beiden Python-Helfer ein. Das Shell-Skript
+ist zusätzlich für einen manuellen Start vorgesehen. Änderungen an dieser
+Sequenz liegen lokal im Projekt und werden beim nächsten Bootstrap verwendet.
 
 ---
 
@@ -167,4 +228,3 @@ Die Pixelmenge skaliert quadratisch und bestimmt direkt die Tensorskalierung in 
 
 > [!TIP]
 > Beginne immer mit **480p** (`832x480`). Wenn Bewegung und Bildaufbau gefallen, kann das Video gezielt in 720p oder 1080p neu gerechnet werden.
-

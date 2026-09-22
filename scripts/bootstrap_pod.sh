@@ -6,15 +6,25 @@
 # vollautomatisch ein und behebt alle bekannten Inkompatibilitäten (Triton, PyTorch).
 #
 # Ausführung auf dem Pod:
-#   bash /workspace/bootstrap_pod.sh
+#   bootstrap_pod.sh, check_pod_cuda.py und patch_wan2gp_proxy.py nach /workspace kopieren, dann:
+#   WANGP_PUBLIC_ORIGIN=https://POD_ID-7860.proxy.runpod.net bash /workspace/bootstrap_pod.sh
 # ==============================================================================
 
 set -e
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${WANGP_PUBLIC_ORIGIN:-}" ]; then
+    if [ -z "${RUNPOD_POD_ID:-}" ]; then
+        echo "WANGP_PUBLIC_ORIGIN oder RUNPOD_POD_ID muss gesetzt sein." >&2
+        exit 1
+    fi
+    WANGP_PUBLIC_ORIGIN="https://${RUNPOD_POD_ID}-7860.proxy.runpod.net"
+fi
+
+echo "=== CUDA-Zugriff vor der Installation prüfen ==="
+python3 "$SCRIPT_DIR/check_pod_cuda.py"
 
 echo "=== [1/5] Erstelle Verzeichnisse & Umgebungsvariablen ==="
 mkdir -p /workspace/.cache/huggingface
-mkdir -p /workspace/Wan2GP/outputs
-mkdir -p /workspace/Wan2GP/ckpts
 export HF_HOME=/workspace/.cache/huggingface
 
 echo "=== [2/5] Wan2GP Repository prüfen / klonen ==="
@@ -22,12 +32,16 @@ if [ ! -d "/workspace/Wan2GP/.git" ]; then
     echo "Klone Wan2GP nach /workspace/Wan2GP..."
     cd /workspace
     git clone https://github.com/deepbeepmeep/Wan2GP.git
-    cd /workspace/Wan2GP
-    echo "Installiere Abhängigkeiten..."
-    pip install --no-cache-dir -r requirements.txt
 else
     echo "Wan2GP ist bereits auf dem persistenten Volume vorhanden."
 fi
+# Die Repo-Dateien bleiben auf /workspace, Python-Pakete im Container nicht
+# unbedingt. Auch nach Resume/abgebrochenem Setup fehlende Abhängigkeiten ergänzen.
+cd /workspace/Wan2GP
+export PYTHONUNBUFFERED=1 PIP_PROGRESS_BAR=off
+echo "Prüfe und installiere Abhängigkeiten..."
+python3 -m pip install --no-cache-dir -r requirements.txt
+mkdir -p /workspace/Wan2GP/outputs /workspace/Wan2GP/ckpts
 
 echo "=== [3/5] Triton-Kompatibilitätspatch anwenden ==="
 # Problem: Container nutzt Triton 3.0.0, Wan2GP nutzt do_not_specialize_on_alignment (erst ab Triton 3.2)
@@ -89,11 +103,12 @@ except Exception as e:
 " 2>/dev/null || true
 
 echo "=== [5/5] Starte Wan2GP WebUI ==="
-if pgrep -f "wgp.py" > /dev/null; then
-    echo "Wan2GP läuft bereits (PID: \$(pgrep -f 'wgp.py'))."
+python3 "$SCRIPT_DIR/patch_wan2gp_proxy.py" --public-origin "$WANGP_PUBLIC_ORIGIN"
+if curl -sf -o /dev/null -m 5 http://127.0.0.1:7860; then
+    echo "Wan2GP läuft bereits. Quellcode-Patches werden beim nächsten Prozessstart aktiv."
 else
     cd /workspace/Wan2GP
-    setsid python wgp.py --server-port 7860 --server-name 0.0.0.0 </dev/null > /workspace/wan2gp.log 2>&1 &
+    setsid python -u wgp.py --server-port 7860 --server-name 0.0.0.0 </dev/null >> /workspace/wan2gp.log 2>&1 &
     sleep 3
     echo "Wan2GP gestartet auf Port 7860."
 fi

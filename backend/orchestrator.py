@@ -2,18 +2,26 @@ import os
 import time
 import threading
 import shlex
+import math
 from typing import Dict, Any, List, Optional
 from collections import deque
+from pathlib import Path
 
 from backend.config_manager import load_config, update_config, get_outputs_dir
 from backend.runpod_client import RunPodClient
 from backend.ssh_client import SSHManager, get_or_create_ssh_keys, load_name_map, save_name_map
 
 class PodOrchestrator:
+    # Wie lange eine per fehlgeschlagener Buchung erkannte "ausgebucht"-Markierung gilt.
+    # Fallback, wenn RunPods Live-Abfrage keinen Bestand liefert. Frische
+    # Bestandsdaten haben Vorrang; alte Buchungsfehler verfallen automatisch.
+    GPU_OUT_OF_STOCK_TTL_SECONDS = 15 * 60
+
     def __init__(self):
         self.lock = threading.Lock()
         self.log_history = deque(maxlen=300)
         self.listeners = set()
+        self.gpu_out_of_stock: Dict[str, float] = {}
 
         self.status = "OFFLINE"
         self.status_detail = "Bereit"
@@ -23,7 +31,13 @@ class PodOrchestrator:
         self.proxy_url: Optional[str] = None
         
         self.session_start_time: Optional[float] = None
-        self.hourly_rate: float = 0.34
+        self.hourly_rate: Optional[float] = None
+        self._hourly_rate_pod_id: Optional[str] = None
+        self._operation_id = 0
+        self.startup_progress = {
+            "phase": "cancelled", "label": "Kein Start aktiv", "detail": "",
+            "started_at": None, "updated_at": None, "active": False,
+        }
         self.accumulated_cost: float = 0.0
         self.last_activity_time: float = time.time()
         
@@ -36,6 +50,10 @@ class PodOrchestrator:
         cfg = load_config()
         self.pod_id = cfg.get("active_pod_id")
         self.status = cfg.get("active_pod_status", "OFFLINE")
+        if not self.pod_id and self.status not in ("OFFLINE", "TERMINATED"):
+            # Older startup workers could persist ERROR after a pod was deleted.
+            self.status = "OFFLINE"
+            update_config({"active_pod_status": "OFFLINE"})
 
         # Start background polling/sync worker thread
         self.bg_thread = threading.Thread(target=self._background_loop, daemon=True)
@@ -71,6 +89,71 @@ class PodOrchestrator:
         key = cfg.get("runpod_api_key", "")
         return RunPodClient(key)
 
+    def _operation_current(self, operation_id, pod_id=None):
+        with self.lock:
+            return (operation_id == self._operation_id
+                    and (pod_id is None or pod_id == self.pod_id))
+
+    def _set_startup_progress(self, phase, label, detail="", operation_id=None):
+        with self.lock:
+            if operation_id is not None and operation_id != self._operation_id:
+                return
+            active = phase in ("booking", "container", "ssh", "install", "launch")
+            previous = getattr(self, "startup_progress", {})
+            now = time.time()
+            self.startup_progress = {
+                "phase": phase, "label": label, "detail": detail[-500:],
+                "started_at": previous.get("started_at") or (now if active else None),
+                "updated_at": now, "active": active,
+            }
+
+    def _refresh_pod_rate(self, pod_id, pod_info, operation_id=None):
+        """Only accept a finite rate reported for this pod and this operation."""
+        value = pod_info.get("costPerHr")
+        try:
+            rate = float(value) if value is not None and not isinstance(value, bool) else None
+        except (ValueError, TypeError, OverflowError):
+            rate = None
+        if rate is None or not math.isfinite(rate) or rate < 0:
+            return False
+        with self.lock:
+            if (not pod_id or self.pod_id != pod_id
+                    or (operation_id is not None and operation_id != self._operation_id)):
+                return False
+            self.hourly_rate = rate
+            self._hourly_rate_pod_id = pod_id
+        return True
+
+    @staticmethod
+    def is_out_of_stock_error(message: str) -> bool:
+        m = (message or "").lower()
+        return ("instances available" in m
+                or "sold out" in m
+                or "ausgebucht" in m)
+
+    def mark_gpu_unavailable(self, gpu_type_id: str):
+        if not gpu_type_id:
+            return
+        with self.lock:
+            self.gpu_out_of_stock[gpu_type_id] = time.time()
+        ttl_min = self.GPU_OUT_OF_STOCK_TTL_SECONDS // 60
+        self.log(f"'{gpu_type_id}' ist aktuell ausgebucht (Markierung läuft nach {ttl_min} Min. ab).", level="WARNING")
+
+    def get_gpu_availability(self) -> Dict[str, bool]:
+        """Returns {gpu_type_id: False} for GPUs with a live out-of-stock mark."""
+        now = time.time()
+        with self.lock:
+            expired = [g for g, ts in self.gpu_out_of_stock.items()
+                       if now - ts > self.GPU_OUT_OF_STOCK_TTL_SECONDS]
+            for g in expired:
+                del self.gpu_out_of_stock[g]
+            return {g: False for g in self.gpu_out_of_stock}
+
+    def reset_gpu_availability(self):
+        with self.lock:
+            self.gpu_out_of_stock.clear()
+        self.log("Verfügbarkeits-Markierungen zurückgesetzt.")
+
     def get_account_email(self) -> str:
         """Returns the account email, cached for 300s to avoid spamming RunPod API on every poll."""
         now = time.time()
@@ -93,22 +176,31 @@ class PodOrchestrator:
 
     def _reconcile_startup_state(self):
         """Recovers runtime state (IP, SSH port, proxy URL, cost, uptime) after server restart."""
-        if not self.pod_id:
+        with self.lock:
+            pod_id, operation_id = self.pod_id, self._operation_id
+        if not pod_id:
             return
         try:
             client = self.get_client()
-            pod = client.get_pod(self.pod_id)
+            pod = client.get_pod(pod_id)
+            if not self._operation_current(operation_id, pod_id):
+                return
             if not pod:
                 self.log(f"Persistierter Pod {self.pod_id} existiert auf RunPod nicht mehr. Bereinige Status...", level="WARNING")
                 with self.lock:
+                    if operation_id != self._operation_id or self.pod_id != pod_id:
+                        return
                     self.pod_id = None
+                    self.hourly_rate = None
+                    self._hourly_rate_pod_id = None
                     self.status = "OFFLINE"
                     self.status_detail = "Bereit"
-                update_config({"active_pod_id": None, "active_pod_status": "OFFLINE"})
+                    update_config({"active_pod_id": None, "active_pod_status": "OFFLINE"})
                 return
 
             desired = pod.get("desiredStatus")
             if desired == "RUNNING":
+                self._refresh_pod_rate(pod_id, pod, operation_id)
                 runtime = pod.get("runtime") or {}
                 ports = runtime.get("ports") or []
                 ip = None
@@ -120,47 +212,94 @@ class PodOrchestrator:
                         break
 
                 with self.lock:
+                    if operation_id != self._operation_id or self.pod_id != pod_id:
+                        return
                     self.status = "RUNNING"
-                    self.status_detail = "Wan2GP aktiv & verbunden"
+                    self.status_detail = "Prüfe Wan2GP-WebUI im Pod..."
                     self.pod_ip = ip
                     self.pod_ssh_port = int(ssh_port) if ssh_port else None
                     self.proxy_url = RunPodClient.get_proxy_url(self.pod_id, 7860)
-                    self.hourly_rate = float(pod.get("costPerHr") or 0.34)
                     uptime = runtime.get("uptimeInSeconds") or 0
                     self.session_start_time = time.time() - uptime
                     self.last_activity_time = time.time()
-                update_config({"active_pod_status": "RUNNING"})
+                    update_config({"active_pod_status": "RUNNING"})
                 self.log(f"Zustand nach Server-Neustart wiederhergestellt: Pod {self.pod_id} läuft (SSH: {ip}:{ssh_port})")
+
+                # wgp.py überlebt keinen Container-Neustart - nach einem Server-
+                # Neustart muss die WebUI explizit geprüft und ggf. neu gestartet
+                # werden, sonst meldet die App fälschlich "aktiv & verbunden".
+                if ip and ssh_port and self._operation_current(operation_id, pod_id):
+                    self._ensure_webui_after_reconcile(ip, int(ssh_port))
+                elif self._operation_current(operation_id, pod_id):
+                    # A dashboard restart during provisioning must keep waiting
+                    # instead of claiming that a not-yet-reachable WebUI is ready.
+                    with self.lock:
+                        if operation_id != self._operation_id or self.pod_id != pod_id:
+                            return
+                        self.status = "STARTING"
+                        self.status_detail = "Warte auf Container-Initialisierung..."
+                    self._deploy_or_resume_worker(operation_id)
 
             elif desired == "EXITED":
                 with self.lock:
+                    if operation_id != self._operation_id or self.pod_id != pod_id:
+                        return
                     self.status = "STOPPED"
                     self.status_detail = "GPU pausiert (Standby)"
                     self.pod_ip = None
                     self.pod_ssh_port = None
-                update_config({"active_pod_status": "STOPPED"})
+                    self.hourly_rate = None
+                    self._hourly_rate_pod_id = None
+                    update_config({"active_pod_status": "STOPPED"})
                 self.log(f"Zustand nach Server-Neustart wiederhergestellt: Pod {self.pod_id} ist im Standby.")
 
             elif desired == "TERMINATED":
                 with self.lock:
+                    if operation_id != self._operation_id or self.pod_id != pod_id:
+                        return
                     self.pod_id = None
+                    self.hourly_rate = None
+                    self._hourly_rate_pod_id = None
                     self.status = "OFFLINE"
                     self.status_detail = "Bereit"
-                update_config({"active_pod_id": None, "active_pod_status": "OFFLINE"})
+                    update_config({"active_pod_id": None, "active_pod_status": "OFFLINE"})
         except Exception as e:
-            self.log(f"Hinweis: Status-Reconciliation nach Start übersprungen ({e})", level="WARNING")
+            with self.lock:
+                if operation_id != self._operation_id or self.pod_id != pod_id:
+                    return
+                self.status = "ERROR"
+                self.status_detail = "Pod-Status konnte nicht geprüft werden - API-Verbindung prüfen und erneut starten."
+                self.startup_progress.update(
+                    phase="error", label="Pod-Status prüfen", detail=self.status_detail,
+                    active=False, updated_at=time.time(),
+                )
+                update_config({"active_pod_status": "ERROR"})
+            self.log(f"Status-Reconciliation fehlgeschlagen ({type(e).__name__}); vorhandener Pod bleibt gespeichert.", level="WARNING")
 
     def start_pod(self) -> Dict[str, Any]:
         with self.lock:
             if self.status in ["RUNNING", "STARTING", "BOOTSTRAPPING"]:
                 return {"success": False, "message": f"Pod befindet sich bereits im Status {self.status}"}
             self.status = "STARTING"
+            self._operation_id += 1
+            operation_id = self._operation_id
             self.status_detail = "Initialisiere Pod..."
             self.last_activity_time = time.time()
             self.session_start_time = None
             self.accumulated_cost = 0.0
+            self.hourly_rate = None
+            self._hourly_rate_pod_id = None
+            self.pod_ip = None
+            self.pod_ssh_port = None
+            self.proxy_url = None
+            now = time.time()
+            self.startup_progress = {
+                "phase": "booking", "label": "GPU wird angefragt",
+                "detail": "RunPod weist eine passende Instanz zu.",
+                "started_at": now, "updated_at": now, "active": True,
+            }
 
-        threading.Thread(target=self._deploy_or_resume_worker, daemon=True).start()
+        threading.Thread(target=self._deploy_or_resume_worker, args=(operation_id,), daemon=True).start()
         return {"success": True, "message": "Startvorgang eingeleitet"}
 
     def stop_pod(self) -> Dict[str, Any]:
@@ -170,17 +309,34 @@ class PodOrchestrator:
         if not pod_id:
             return {"success": False, "message": "Kein aktiver Pod vorhanden."}
 
+        with self.lock:
+            self._operation_id += 1
+            operation_id = self._operation_id
         client = self.get_client()
         self.log(f"Pausiere Pod {pod_id} (GPU wird gestoppt, Volume bleibt erhalten)...")
         try:
             client.stop_pod(pod_id)
             with self.lock:
+                if operation_id != self._operation_id or self.pod_id != pod_id:
+                    return {"success": True, "message": "Pause ausgeführt; neueren Zustand beibehalten"}
                 self.status = "STOPPED"
                 self.status_detail = "Pod pausiert (Speicher erhalten)"
-            update_config({"active_pod_status": "STOPPED"})
+                self.session_start_time = None
+                self.hourly_rate = None
+                self._hourly_rate_pod_id = None
+                self.startup_progress.update(phase="cancelled", label="Start abgebrochen",
+                                             detail="Pod wurde pausiert.", active=False, updated_at=time.time())
+                update_config({"active_pod_status": "STOPPED"})
             self.log("Pod erfolgreich pausiert. GPU-Kosten gestoppt.")
             return {"success": True, "message": "Pod pausiert"}
         except Exception as e:
+            with self.lock:
+                if operation_id == self._operation_id:
+                    self.status = "ERROR"
+                    self.status_detail = "Pausieren fehlgeschlagen - Pod-Status prüfen"
+                    self.startup_progress.update(phase="error", label="Pausieren fehlgeschlagen",
+                                                 detail=self.status_detail, active=False, updated_at=time.time())
+                    update_config({"active_pod_status": "ERROR"})
             self.log(f"Fehler beim Pausieren: {e}", level="ERROR")
             return {"success": False, "message": str(e)}
 
@@ -191,25 +347,48 @@ class PodOrchestrator:
         if not pod_id:
             return {"success": False, "message": "Kein aktiver Pod vorhanden."}
 
+        with self.lock:
+            self._operation_id += 1
+            operation_id = self._operation_id
         client = self.get_client()
         self.log(f"Terminiere Pod {pod_id} vollständig (0 € Standby-Kosten)...", level="WARNING")
         try:
             client.terminate_pod(pod_id)
             with self.lock:
+                if operation_id != self._operation_id or self.pod_id != pod_id:
+                    return {"success": True, "message": "Löschen ausgeführt; neueren Zustand beibehalten"}
                 self.status = "TERMINATED"
                 self.status_detail = "Pod gelöscht (0,00 € Standby)"
                 self.pod_id = None
                 self.pod_ip = None
                 self.pod_ssh_port = None
                 self.proxy_url = None
-            update_config({"active_pod_id": None, "active_pod_status": "TERMINATED"})
+                self.hourly_rate = None
+                self._hourly_rate_pod_id = None
+                self.session_start_time = None
+                self.accumulated_cost = 0.0
+                self.startup_progress.update(phase="cancelled", label="Start abgebrochen",
+                                             detail="Pod wurde gelöscht.", active=False, updated_at=time.time())
+                update_config({"active_pod_id": None, "active_pod_status": "TERMINATED"})
             self.log("Pod erfolgreich terminiert. Keine weiteren Kosten.")
             return {"success": True, "message": "Pod terminiert"}
         except Exception as e:
+            with self.lock:
+                if operation_id == self._operation_id:
+                    self.status = "ERROR"
+                    self.status_detail = "Löschen fehlgeschlagen - Pod-Status prüfen"
+                    self.startup_progress.update(phase="error", label="Löschen fehlgeschlagen",
+                                                 detail=self.status_detail, active=False, updated_at=time.time())
+                    update_config({"active_pod_status": "ERROR"})
             self.log(f"Fehler beim Terminieren: {e}", level="ERROR")
             return {"success": False, "message": str(e)}
 
-    def _deploy_or_resume_worker(self):
+    def _deploy_or_resume_worker(self, operation_id=None):
+        if operation_id is None:
+            with self.lock:
+                operation_id = self._operation_id
+        if not self._operation_current(operation_id):
+            return
         cfg = load_config()
         client = self.get_client()
         _, pub_key = get_or_create_ssh_keys()
@@ -220,19 +399,47 @@ class PodOrchestrator:
         can_resume = False
         already_running = False
         if pod_id:
+            existing_pod_error = None
             try:
                 pod_info = client.get_pod(pod_id)
-                if pod_info:
+                if not self._operation_current(operation_id):
+                    return
+                if pod_info is not None:
                     desired = pod_info.get("desiredStatus")
                     if desired == "EXITED":
                         can_resume = True
                     elif desired == "RUNNING":
                         already_running = True
-            except Exception:
-                can_resume = False
-                already_running = False
+                    else:
+                        existing_pod_error = (
+                            "Vorhandener Pod ist weder eindeutig RUNNING noch EXITED. "
+                            "RunPod-Status prüfen; es wurde kein neuer Pod gebucht."
+                        )
+            except Exception as e:
+                # An unavailable status endpoint is not proof that the pod is
+                # gone. Never buy a replacement while the existing pod is unknown.
+                # Network exception text can contain the API key in its URL.
+                existing_pod_error = (
+                    f"Status des vorhandenen Pods konnte nicht abgefragt werden ({type(e).__name__}). "
+                    "API-Verbindung prüfen; es wurde kein neuer Pod gebucht."
+                )
+            if existing_pod_error:
+                with self.lock:
+                    if operation_id != self._operation_id:
+                        return
+                    self.status = "ERROR"
+                    self.status_detail = existing_pod_error
+                    self.startup_progress.update(
+                        phase="error", label="Vorhandenen Pod prüfen",
+                        detail=existing_pod_error, active=False, updated_at=time.time(),
+                    )
+                    update_config({"active_pod_status": "ERROR"})
+                self.log(existing_pod_error, level="ERROR")
+                return
 
         try:
+            if not self._operation_current(operation_id):
+                return
             if already_running:
                 self.log(f"Pod {pod_id} existiert und läuft bereits. Verwende ihn weiter...")
             elif can_resume:
@@ -254,18 +461,31 @@ class PodOrchestrator:
                     public_ssh_key=pub_key
                 )
                 with self.lock:
+                    if operation_id != self._operation_id:
+                        return
                     self.pod_id = pod_id
-                update_config({"active_pod_id": pod_id, "active_pod_status": "STARTING"})
+                    update_config({"active_pod_id": pod_id, "active_pod_status": "STARTING"})
                 self.log(f"Pod erfolgreich gebucht! Pod-ID: {pod_id}")
 
+            if not self._operation_current(operation_id, pod_id):
+                return
             # Wait for RUNNING and SSH port mapping
+            self._set_startup_progress("container", "Container wird bereitgestellt",
+                                       "Warte auf öffentliche IP und SSH-Port von RunPod.", operation_id)
             self.log("Warte auf Zuweisung von IP und SSH-Port durch RunPod...")
             ip, ssh_port = None, None
             pod_info = None
             for attempt in range(60):
-                time.sleep(5)
+                if not self._operation_current(operation_id, pod_id):
+                    return
+                # Fetch the booked rate immediately; SSH allocation can take minutes.
                 pod_info = client.get_pod(pod_id)
+                if not self._operation_current(operation_id, pod_id):
+                    return
+                if pod_info:
+                    self._refresh_pod_rate(pod_id, pod_info, operation_id)
                 if not pod_info:
+                    time.sleep(5)
                     continue
 
                 status = pod_info.get("desiredStatus")
@@ -281,19 +501,19 @@ class PodOrchestrator:
                         break
                 if (attempt + 1) % 6 == 0:
                     self.log(f"Warte auf Container-Initialisierung... ({attempt+1}/60)")
+                self._set_startup_progress("container", "Container wird bereitgestellt",
+                                           f"RunPod antwortet; SSH ist noch nicht bereit (Abfrage {attempt + 1}).", operation_id)
+                time.sleep(5)
 
             if not ip or not ssh_port:
                 raise Exception("Timeout beim Warten auf öffentliche IP / SSH-Port des Containers.")
 
             with self.lock:
+                if operation_id != self._operation_id or self.pod_id != pod_id:
+                    return
                 self.pod_ip = ip
                 self.pod_ssh_port = int(ssh_port)
                 self.proxy_url = RunPodClient.get_proxy_url(pod_id, 7860)
-                if pod_info and pod_info.get("costPerHr"):
-                    try:
-                        self.hourly_rate = float(pod_info["costPerHr"])
-                    except ValueError:
-                        pass
                 self.status = "BOOTSTRAPPING"
                 self.status_detail = "Richte Wan2GP & Modell-Umgebung ein..."
 
@@ -301,40 +521,172 @@ class PodOrchestrator:
             
             # Bootstrap Wan2GP via SSH
             bootstrap_ok = self._bootstrap_wan2gp(ip, int(ssh_port))
+            if not self._operation_current(operation_id, pod_id):
+                return
             if not bootstrap_ok:
                 with self.lock:
+                    if operation_id != self._operation_id or self.pod_id != pod_id:
+                        return
                     self.status = "ERROR"
                     self.status_detail = "Bootstrap fehlgeschlagen - Terminal prüfen"
-                update_config({"active_pod_status": "ERROR"})
+                    failed_label = self.startup_progress.get("label", "Einrichtung")
+                    last_detail = self.startup_progress.get("detail") or self.status_detail
+                    self.startup_progress.update(phase="error", label=f"{failed_label} – fehlgeschlagen",
+                                                 detail=last_detail, active=False, updated_at=time.time())
+                    update_config({"active_pod_status": "ERROR"})
                 return
 
             with self.lock:
+                if operation_id != self._operation_id or self.pod_id != pod_id:
+                    return
                 self.status = "RUNNING"
                 self.status_detail = "Wan2GP aktiv & bereit"
                 self.session_start_time = time.time()
                 self.last_activity_time = time.time()
-            update_config({"active_pod_status": "RUNNING"})
+                self.startup_progress.update(phase="ready", label="WanGP-WebUI bereit",
+                                             detail="WebUI und Browser-Verbindung erfolgreich geprüft.",
+                                             active=False, updated_at=time.time())
+                update_config({"active_pod_status": "RUNNING"})
             self.log(f"Wan2GP erfolgreich gestartet! Bereit unter {self.proxy_url}")
 
         except Exception as e:
+            if not self._operation_current(operation_id):
+                return
             err_msg = str(e)
             self.log(f"Fehler beim Starten des Pods: {err_msg}", level="ERROR")
             friendly_hint = err_msg
-            if "no longer any instances available" in err_msg.lower():
-                friendly_hint = "Die gewählte GPU ist in der Community Cloud gerade ausgebucht. Tipp: Wähle 'NVIDIA A40' (48 GB VRAM, ~$0.35/h) oder schalte auf 'Secure Cloud' um und klicke erneut auf 'Pod Starten'."
+            if self.is_out_of_stock_error(err_msg):
+                self.mark_gpu_unavailable(cfg.get("gpu_type_id", ""))
+                friendly_hint = "Die gewählte GPU ist gerade ausgebucht. Vergleiche aktuelle Preise und Verfügbarkeit in der GPU-Auswahl."
                 self.log(friendly_hint, level="WARNING")
             with self.lock:
+                if operation_id != self._operation_id:
+                    return
                 self.status = "ERROR"
                 self.status_detail = friendly_hint
-            update_config({"active_pod_status": "ERROR"})
+                failed_label = self.startup_progress.get("label", "Start")
+                self.startup_progress.update(phase="error", label=f"{failed_label} – fehlgeschlagen",
+                                             detail=friendly_hint[-500:], active=False, updated_at=time.time())
+                update_config({"active_pod_status": "ERROR"})
+
+    def _webui_probe_command(self):
+        command = "curl -sf -o /dev/null -m 5 http://127.0.0.1:7860"
+        if self.proxy_url:
+            # An empty queue request must fail validation (422), not the
+            # browser origin check (403). No job can be created without data.
+            command += (
+                " && [ \"$(curl -s -o /dev/null -m 5 -w '%{http_code}'"
+                " -H 'Content-Type: application/json'"
+                f" -H {shlex.quote('Origin: ' + self.proxy_url)}"
+                " -X POST --data '{}' http://127.0.0.1:7860/gradio_api/queue/join)\" = 422 ]"
+            )
+        return command + " && echo READY"
+
+    def _ensure_webui_after_reconcile(self, ip: str, ssh_port: int):
+        """Prüft nach einem Server-Neustart, ob die Wan2GP-WebUI im Pod antwortet,
+        und startet andernfalls den Bootstrap (Patches + wgp.py) neu."""
+        operation_id = getattr(self, "_operation_id", None)
+        pod_id = getattr(self, "pod_id", None)
+        def cancelled():
+            return operation_id is not None and not self._operation_current(operation_id, pod_id)
+
+        try:
+            ssh = SSHManager(ip, ssh_port, log_callback=self.log)
+            for attempt in range(6):
+                if cancelled():
+                    return
+                try:
+                    ssh.get_client(timeout=10).close()
+                    break
+                except Exception:
+                    time.sleep(5)
+
+            code, out, _ = ssh.exec_command(self._webui_probe_command(), timeout=15)
+            if cancelled():
+                return
+            if code == 0 and "READY" in out.splitlines():
+                with self.lock:
+                    if operation_id is not None and (operation_id != self._operation_id or self.pod_id != pod_id):
+                        return
+                    self.status_detail = "Wan2GP aktiv & verbunden"
+                    self.status = "RUNNING"
+                    if hasattr(self, "startup_progress"):
+                        self.startup_progress.update(phase="ready", label="WanGP-WebUI bereit", active=False, updated_at=time.time())
+                self.log("Wan2GP-WebUI antwortet - nichts zu tun.")
+                return
+
+            with self.lock:
+                if operation_id is not None and (operation_id != self._operation_id or self.pod_id != pod_id):
+                    return
+                self.status = "BOOTSTRAPPING"
+                self.status_detail = "WanGP wird wiederhergestellt..."
+            self.log("Wan2GP-WebUI antwortet nicht - starte Wan2GP im Pod neu...", level="WARNING")
+            bootstrap_ok = self._bootstrap_wan2gp(ip, ssh_port)
+            if cancelled():
+                return
+            if bootstrap_ok:
+                with self.lock:
+                    if operation_id is not None and (operation_id != self._operation_id or self.pod_id != pod_id):
+                        return
+                    self.status_detail = "Wan2GP aktiv & bereit"
+                    self.status = "RUNNING"
+                    if hasattr(self, "startup_progress"):
+                        self.startup_progress.update(phase="ready", label="WanGP-WebUI bereit", active=False, updated_at=time.time())
+                    update_config({"active_pod_status": "RUNNING"})
+                self.log(f"Wan2GP-WebUI wiederhergestellt: {self.proxy_url}")
+            else:
+                with self.lock:
+                    if operation_id is not None and (operation_id != self._operation_id or self.pod_id != pod_id):
+                        return
+                    self.status_detail = "WebUI-Restart fehlgeschlagen - Logs prüfen"
+                    self.status = "ERROR"
+                    if hasattr(self, "startup_progress"):
+                        failed_label = self.startup_progress.get("label", "WebUI")
+                        self.startup_progress.update(phase="error", label=f"{failed_label} – fehlgeschlagen", active=False, updated_at=time.time())
+                    update_config({"active_pod_status": "ERROR"})
+        except Exception as e:
+            if cancelled():
+                return
+            with self.lock:
+                if operation_id is not None and (operation_id != self._operation_id or self.pod_id != pod_id):
+                    return
+                self.status = "ERROR"
+                self.status_detail = "WebUI-Prüfung fehlgeschlagen - Logs prüfen"
+                if hasattr(self, "startup_progress"):
+                    self.startup_progress.update(phase="error", label="WebUI-Prüfung fehlgeschlagen", active=False, updated_at=time.time())
+                update_config({"active_pod_status": "ERROR"})
+            self.log(f"Hinweis: WebUI-Prüfung nach Reconcile fehlgeschlagen ({e})", level="WARNING")
+
+    def _log_wan2gp_tail(self, ssh):
+        """Holt bei Startfehlern die tatsächliche Wan2GP-Ausgabe vom Pod."""
+        try:
+            code, out, err = ssh.exec_command(
+                "tail -n 80 /workspace/wan2gp.log", timeout=15)
+            if code == 0 and out.strip():
+                self.log(f"Letzte Wan2GP-Logzeilen:\n{out[-12000:]}", level="ERROR")
+            else:
+                self.log(f"Wan2GP-Log nicht verfügbar: {err.strip() or 'Log ist leer'}", level="WARNING")
+        except Exception as e:
+            self.log(f"Wan2GP-Log konnte nicht gelesen werden: {e}", level="WARNING")
 
     def _bootstrap_wan2gp(self, ip: str, port: int):
+        operation_id = getattr(self, "_operation_id", None)
+        pod_id = getattr(self, "pod_id", None)
+        def cancelled():
+            return operation_id is not None and not self._operation_current(operation_id, pod_id)
+
+        if cancelled():
+            return False
+        self._set_startup_progress("ssh", "SSH-Verbindung wird aufgebaut",
+                                   "Warte auf den SSH-Dienst im Container.", operation_id)
         self.log("Starte SSH-Bootstrap für Wan2GP auf dem Pod...")
         ssh = SSHManager(ip, port, log_callback=self.log)
 
         # Retry SSH connect for up to 60s
         connected = False
         for attempt in range(12):
+            if cancelled():
+                return False
             try:
                 client = ssh.get_client(timeout=10)
                 client.close()
@@ -346,6 +698,44 @@ class PodOrchestrator:
 
         if not connected:
             raise Exception("Konnte keine SSH-Verbindung zum Pod herstellen.")
+        if cancelled():
+            return False
+        self._set_startup_progress("ssh", "GPU-Zugriff wird geprüft",
+                                   "Prüfe den CUDA-Treiber vor der Installation.", operation_id)
+        cuda_check = (Path(__file__).resolve().parents[1] / "scripts" / "check_pod_cuda.py").read_text(encoding="utf-8")
+        cuda_command = "python3 - <<'VIDEOGEN_CUDA'\n" + cuda_check + "\nVIDEOGEN_CUDA\n"
+        cuda_code, cuda_out, cuda_err = ssh.exec_command(cuda_command, timeout=30)
+        if cancelled():
+            return False
+        if cuda_code != 0:
+            detail = (cuda_err.strip() or cuda_out.strip() or "CUDA-Prüfung ohne Rückmeldung fehlgeschlagen.")[-500:]
+            self._set_startup_progress("ssh", "GPU-Zugriff prüfen", detail, operation_id)
+            self.log(f"CUDA-Prüfung fehlgeschlagen: {detail}", level="ERROR")
+            return False
+        self.log(cuda_out.strip() or "CUDA-Prüfung erfolgreich.")
+        self._set_startup_progress("install", "WanGP und Pakete werden installiert",
+                                   "Installation wird im Pod gestartet.", operation_id)
+
+        # The RunPod proxy rewrites Host to its internal address. Wan2GP-Versionen
+        # ab dem Upstream-RunPod-Fix (Sept 2026) bringen dafuer ein --public-url
+        # Flag mit; aeltere Versionen erhalten den exakten Public-Origin weiter
+        # ueber unseren Source-Patch.
+        public_origin = self.proxy_url or RunPodClient.get_proxy_url(self.pod_id, 7860)
+        proxy_patcher = (Path(__file__).resolve().parents[1] / "scripts" / "patch_wan2gp_proxy.py").read_text(encoding="utf-8")
+        proxy_patch_command = (
+            f"python3 - --public-origin {shlex.quote(public_origin)} <<'RUNPOD_PROXY_PATCH'\n"
+            + proxy_patcher + "\nRUNPOD_PROXY_PATCH\n"
+        )
+        origin_fix_block = (
+            "PUBLIC_URL_ARG=\"\"\n"
+            "if grep -q '\"--public-url\"' /workspace/Wan2GP/shared/authentication/__init__.py 2>/dev/null; then\n"
+            "    echo \"[BOOTSTRAP] Wan2GP unterstuetzt --public-url (upstream RunPod-Fix); kein Source-Patch noetig.\"\n"
+            f"    PUBLIC_URL_ARG=\"--public-url {public_origin}\"\n"
+            "else\n"
+            "    echo \"[BOOTSTRAP] Alte Wan2GP-Version: Origin-Pruefung wird gepatcht.\"\n"
+            + proxy_patch_command +
+            "fi\n"
+        )
 
         bootstrap_script = """
         set -e
@@ -354,17 +744,36 @@ class PodOrchestrator:
 
         # Clone or update Wan2GP in persistent volume
         if [ ! -d "/workspace/Wan2GP" ]; then
+            echo "[VIDEOGEN_PHASE] install"
             echo "[BOOTSTRAP] Klone Wan2GP nach /workspace/Wan2GP..."
             cd /workspace
             git clone https://github.com/deepbeepmeep/Wan2GP.git
-            cd /workspace/Wan2GP
-            pip install --no-cache-dir -r requirements.txt
         else
             echo "[BOOTSTRAP] Wan2GP bereits auf Volume vorhanden."
         fi
 
-        # Triton Compatibility Patch for RunPod PyTorch Container:
-        # Wan2GP uses do_not_specialize_on_alignment which is only in Triton 3.2+
+        cd /workspace/Wan2GP
+        export PYTHONUNBUFFERED=1
+        export PIP_PROGRESS_BAR=off
+        echo "[BOOTSTRAP] Prüfe und installiere Python-Pakete; dieser Schritt kann mehrere Minuten dauern..."
+        python3 -m pip install --no-cache-dir -r requirements.txt
+
+        # Torch- und Triton-Stand pruefen: Wan2GP / comfy-kitchen (0.2.35)
+        # benoetigen torch >= 2.5 (custom_op-Schema mit list[int] und
+        # String-Annotationen) bzw. triton >= 3.2. Der RunPod-Container
+        # runpod-torch-v240 liefert torch 2.4.1 / triton 3.0 -> einmalig heben.
+        if ! python3 -c "import torch; raise SystemExit(0 if tuple(map(int, torch.__version__.split('+')[0].split('.')[:2])) >= (2, 5) else 1)"; then
+            echo "[BOOTSTRAP] Torch zu alt fuer Wan2GP-Abhaengigkeiten - upgrade auf 2.6.0 (cu124)..."
+            python3 -m pip install --no-cache-dir "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0"
+        fi
+        python3 -c "import torch, triton; print('[BOOTSTRAP] torch', torch.__version__, '| triton', triton.__version__, '| CUDA:', torch.cuda.is_available())"
+
+        echo "[VIDEOGEN_PHASE] launch"
+
+        # Triton Compatibility Patch NUR fuer triton < 3.2 (RunPod-Altcontainer):
+        # Wan2GP uses do_not_specialize_on_alignment which is only in Triton 3.2+.
+        # Ab triton 3.2 wuerde der Wrapper das kwarg wegwerfen und ist daher gesperrt.
+        if ! python3 -c "import triton; raise SystemExit(0 if tuple(map(int, triton.__version__.split('.')[:2])) >= (3, 2) else 1)"; then
         python3 -c "
 import triton
 p = triton.__file__
@@ -381,6 +790,7 @@ jit = _compatible_jit
     with open(p, 'a') as f:
         f.write('\\n' + wrapper + '\\n')
 " 2>/dev/null || true
+        fi
 
         # PyTorch Compatibility Patch for RunPod PyTorch < 2.5:
         # Wan2GP / mmaudio uses torch.nn.Buffer which was introduced in PyTorch 2.5
@@ -419,38 +829,72 @@ except Exception as e:
         mkdir -p /workspace/Wan2GP/outputs
         mkdir -p /workspace/Wan2GP/ckpts
 
-        # Check if Wan2GP already running
-        if pgrep -f "wgp.py" > /dev/null; then
+        # RUNPOD_ORIGIN_FIX
+
+        # Check if Wan2GP already running - bewusst über den Port statt pgrep:
+        # Ein pgrep auf den Skriptnamen matchet über den bash -c-Wrapper des
+        # SSH-Kommandos die Shell selbst und meldet fälschlich "läuft bereits".
+        if curl -sf -o /dev/null -m 3 http://127.0.0.1:7860; then
             echo "[BOOTSTRAP] Wan2GP laeuft bereits."
         else
             echo "[BOOTSTRAP] Starte Wan2GP WebUI auf Port 7860..."
             cd /workspace/Wan2GP
-            setsid python wgp.py --server-port 7860 --server-name 0.0.0.0 </dev/null > /workspace/wan2gp.log 2>&1 &
+            setsid python -u wgp.py --server-port 7860 --server-name 0.0.0.0 $PUBLIC_URL_ARG </dev/null >> /workspace/wan2gp.log 2>&1 &
             sleep 4
         fi
         """
-        code, out, err = ssh.exec_command(bootstrap_script, timeout=900)
-        self.log(f"Bootstrap-Ausgabe:\n{out}")
+        bootstrap_script = bootstrap_script.replace("        # RUNPOD_ORIGIN_FIX\n", origin_fix_block, 1)
+        progress_phase = "install"
+        def on_install_line(line):
+            nonlocal progress_phase
+            if cancelled():
+                return
+            if line.startswith("[VIDEOGEN_PHASE] "):
+                next_phase = line.split(" ", 1)[1].strip()
+                if next_phase in ("install", "launch"):
+                    progress_phase = next_phase
+                return
+            if not line.strip():
+                return
+            self.log(line)
+            label = "WanGP wird gestartet" if progress_phase == "launch" else "WanGP und Pakete werden installiert"
+            self._set_startup_progress(progress_phase, label, line, operation_id)
+
+        code, out, err = ssh.exec_command_stream(bootstrap_script, timeout=900,
+                                                on_line=on_install_line, cancelled=cancelled)
+        if cancelled():
+            return False
         if code != 0:
             self.log(f"Bootstrap-Fehler (Code {code}):\n{err}", level="ERROR")
+            self._log_wan2gp_tail(ssh)
             return False
 
-        # Readiness poll: verify that port 7860 responds
-        self.log("Prüfe Erreichbarkeit der Wan2GP WebUI (Port 7860)...")
+        # Verify HTTP readiness and that this pod's browser origin is accepted.
+        self._set_startup_progress("launch", "WebUI wird geprüft",
+                                   "Warte auf HTTP-Antwort und gültige Browser-Verbindung.", operation_id)
+        self.log("Prüfe Wan2GP-WebUI und Browser-Origin (Port 7860)...")
         for attempt in range(18):
             time.sleep(5)
-            chk_code, chk_out, _ = ssh.exec_command("curl -sf -o /dev/null http://127.0.0.1:7860 && echo READY", timeout=10)
-            if "READY" in chk_out:
+            if cancelled():
+                return False
+            chk_code, chk_out, _ = ssh.exec_command(self._webui_probe_command(), timeout=15)
+            if cancelled():
+                return False
+            if chk_code == 0 and "READY" in chk_out.splitlines():
                 self.log("Wan2GP WebUI ist erreichbar und bereit!")
                 return True
             self.log(f"Warte auf Wan2GP WebUI... ({attempt+1}/18)")
+            self._set_startup_progress("launch", "WebUI wird geprüft",
+                                       f"WebUI antwortet noch nicht (Prüfung {attempt + 1} von 18).", operation_id)
 
-        self.log("Hinweis: Wan2GP braucht eventuell noch etwas Zeit zum Laden der Modellgewichte.", level="WARNING")
-        return True
+        self.log("Wan2GP-WebUI antwortet nach Ablauf der Startprüfung nicht. Start fehlgeschlagen; Logs prüfen.", level="ERROR")
+        self._log_wan2gp_tail(ssh)
+        return False
 
     def _background_loop(self):
         """Monitors session cost, auto-shutdown timer and syncs videos."""
         sync_counter = 0
+        last_rate_poll = 0
         while not self._stop_bg_thread:
             time.sleep(2)
             try:
@@ -459,14 +903,29 @@ except Exception as e:
 
                 with self.lock:
                     status = self.status
+                    pod_id, operation_id = self.pod_id, self._operation_id
+
+                if pod_id and status in ("RUNNING", "BOOTSTRAPPING", "ERROR") and now - last_rate_poll >= 30:
+                    last_rate_poll = now
+                    try:
+                        pod = self.get_client().get_pod(pod_id)
+                        if pod:
+                            self._refresh_pod_rate(pod_id, pod, operation_id)
+                    except Exception as e:
+                        # Pricing is advisory; its API must not block the idle
+                        # shutdown check or forget an otherwise running pod.
+                        self.log(f"Pod-Preis konnte nicht aktualisiert werden ({type(e).__name__}); letzter bestätigter Preis bleibt erhalten.", level="WARNING")
+                if not self._operation_current(operation_id, pod_id):
+                    continue
 
                 if status != "RUNNING":
                     continue
 
                 # Update live cost
-                if self.session_start_time:
-                    elapsed_hours = (now - self.session_start_time) / 3600.0
-                    self.accumulated_cost = elapsed_hours * self.hourly_rate
+                with self.lock:
+                    if self.session_start_time and self.hourly_rate is not None:
+                        elapsed_hours = (now - self.session_start_time) / 3600.0
+                        self.accumulated_cost = elapsed_hours * self.hourly_rate
 
                 # Auto-Shutdown Check
                 try:
@@ -508,25 +967,29 @@ except Exception as e:
 
     def get_state(self) -> Dict[str, Any]:
         cfg = load_config()
-        uptime_sec = 0
-        if self.session_start_time and self.status == "RUNNING":
-            uptime_sec = int(time.time() - self.session_start_time)
-
-        return {
-            "status": self.status,
-            "status_detail": self.status_detail,
-            "pod_id": self.pod_id,
-            "pod_ip": self.pod_ip,
-            "pod_ssh_port": self.pod_ssh_port,
-            "proxy_url": self.proxy_url,
-            "uptime_seconds": uptime_sec,
-            "hourly_rate": round(self.hourly_rate, 2),
-            "accumulated_cost": round(self.accumulated_cost, 4),
-            "standby_mode": cfg.get("standby_mode", "stop"),
-            "gpu_type_id": cfg.get("gpu_type_id", "NVIDIA A40"),
-            "auto_shutdown_minutes": cfg.get("auto_shutdown_minutes", 30),
-            "recent_logs": list(self.log_history)[-50:]
-        }
+        with self.lock:
+            uptime_sec = 0
+            if self.session_start_time and self.status == "RUNNING":
+                uptime_sec = int(time.time() - self.session_start_time)
+            rate_known = (self.hourly_rate is not None and self.pod_id is not None
+                          and self._hourly_rate_pod_id == self.pod_id)
+            return {
+                "status": self.status,
+                "status_detail": self.status_detail,
+                "pod_id": self.pod_id,
+                "pod_ip": self.pod_ip,
+                "pod_ssh_port": self.pod_ssh_port,
+                "proxy_url": self.proxy_url,
+                "uptime_seconds": uptime_sec,
+                "hourly_rate": round(self.hourly_rate, 6) if rate_known else None,
+                "hourly_rate_source": "runpod" if rate_known else "unknown",
+                "startup_progress": dict(self.startup_progress),
+                "accumulated_cost": round(self.accumulated_cost, 4),
+                "standby_mode": cfg.get("standby_mode", "stop"),
+                "gpu_type_id": cfg.get("gpu_type_id", "NVIDIA A40"),
+                "auto_shutdown_minutes": cfg.get("auto_shutdown_minutes", 30),
+                "recent_logs": list(self.log_history)[-50:]
+            }
 
     def delete_video(self, filename: str) -> bool:
         """Deletes a video file locally and remotely on the pod (if running) to prevent re-sync."""
@@ -565,4 +1028,3 @@ except Exception as e:
                 self.log(f"Hinweis: Konnte Video auf Pod nicht löschen: {e}", level="WARNING")
 
         return deleted_anything
-

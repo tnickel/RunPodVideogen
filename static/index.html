@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RunPod VideoGen Studio</title>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=4">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -102,6 +102,21 @@
         </div>
         <div class="guidance-btn-container" id="guidanceAction"></div>
       </div>
+      <section class="startup-progress" id="startupProgressPanel" hidden aria-labelledby="startupPhaseLabel">
+        <div class="startup-progress-header">
+          <div class="startup-phase">
+            <span class="startup-caption">Startfortschritt</span>
+            <strong id="startupPhaseLabel" role="status" aria-live="polite">Start wird vorbereitet</strong>
+            <span class="startup-state-badge" id="startupStateBadge">Wartet</span>
+          </div>
+          <dl class="startup-times">
+            <div><dt>Vergangen</dt><dd id="startupElapsed">—</dd></div>
+            <div><dt>Letzte Rückmeldung</dt><dd id="startupLastFeedback">Noch keine</dd></div>
+          </dl>
+        </div>
+        <div class="startup-progress-track" id="startupProgressBar" role="progressbar" aria-label="Startfortschritt" aria-describedby="startupProgressDetail"><span></span></div>
+        <p class="startup-detail" id="startupProgressDetail" role="status" aria-live="polite">Warte auf die nächste Rückmeldung …</p>
+      </section>
     </section>
 
     <!-- Row 1: Mission Control & Kosten-Cockpit -->
@@ -140,13 +155,18 @@
         <!-- Inline Hardware & Setting Controls -->
         <div class="controls-row-compact">
           <div class="control-col">
-            <label class="compact-label">Grafikkarte (GPU):</label>
-            <select id="gpuSelect" class="form-select-compact">
-              <option value="NVIDIA A40" selected>A40 (48 GB) • ~$0.35/h (Empfohlen)</option>
-              <option value="NVIDIA GeForce RTX 4090">RTX 4090 (24 GB) • ~$0.34/h</option>
-              <option value="NVIDIA GeForce RTX 3090">RTX 3090 (24 GB) • ~$0.22/h</option>
-              <option value="NVIDIA A100-SXM4-80GB">A100 (80 GB) • ~$1.39/h</option>
+            <label class="compact-label" for="openGpuPickerBtn">Grafikkarte für einen neuen Pod:</label>
+            <select id="gpuSelect" hidden aria-hidden="true" tabindex="-1">
+              <option value="NVIDIA A40" selected>NVIDIA A40</option>
             </select>
+            <button id="openGpuPickerBtn" class="gpu-picker-launch" type="button" aria-haspopup="dialog">
+              <span><strong id="selectedGpuName">NVIDIA A40</strong><small>Grafikkarten vergleichen & auswählen</small></span>
+              <span aria-hidden="true">↗</span>
+            </button>
+            <div style="display: flex; align-items: center; gap: 8px; margin-top: 5px;">
+              <button id="refreshGpuBtn" class="icon-btn" style="padding: 2px 8px; font-size: 0.68rem;" title="Preise und Verfügbarkeit neu abfragen">⟳ Aktualisieren</button>
+              <span id="gpuAvailabilityHint" class="settings-desc" style="font-size: 0.68rem;">Verfügbarkeit wird geladen…</span>
+            </div>
           </div>
 
           <div class="control-col">
@@ -180,7 +200,7 @@
           <span id="volumeDiskDisplay">75</span>
           <button id="modeStopBtn" class="active" data-mode="stop"></button>
           <button id="modeTermBtn" data-mode="terminate"></button>
-          <span id="hourlyRateDisplay">$0.34 /h</span>
+          <span id="hourlyRateDisplay">— /h</span>
         </div>
       </section>
 
@@ -222,7 +242,7 @@
                   <span>⏸️</span> GPU Pausieren (Stop)
                 </button>
                 <button id="btnCockpitResume" class="btn-action-sm btn-primary" style="display: none;">
-                  <span>⚡</span> Pod Aufwecken (Resume 45s)
+                  <span>⚡</span> Pod Aufwecken (Resume)
                 </button>
                 <button id="btnCockpitTerminate" class="btn-danger-sm" style="display: none;" title="Pod und Speicher endgültig löschen für 0,- € Kosten">
                   <span>🗑️</span> Pod Löschen (0 €)
@@ -235,28 +255,29 @@
           <div class="cockpit-right">
             <div class="rate-box-compact">
               <div class="rate-header-line">
-                <span class="rate-caption">AKTUELLE KOSTEN-RATE</span>
-                <span class="session-timer-badge">Session: <span id="sessionTimer">00:00:00</span> (<span id="sessionCostDisplay">$0.0000</span>)</span>
+                <span class="rate-caption">AKTUELLE GPU-RATE</span>
+                <span class="session-timer-badge" title="Schätzung für diese Sitzung, kein Rechnungsbetrag">Session: <span id="sessionTimer">00:00:00</span> (<span id="sessionCostDisplay">—</span>)</span>
               </div>
-              <div class="main-rate-compact" id="cockpitHourlyRate">$0.000 <span class="rate-unit">/ Std.</span></div>
+              <div class="main-rate-compact" id="cockpitHourlyRate">— <span class="rate-unit">/ Std.</span></div>
+              <div class="conn-text" id="cockpitRateSource" aria-live="polite">Pod-Preis wird abgefragt …</div>
             </div>
 
             <div class="projection-grid-compact">
               <div class="p-chip">
-                <span class="p-chip-label">PRO TAG (24H)</span>
-                <span class="p-chip-val" id="cockpitDailyRate">$0.00</span>
+                <span class="p-chip-label">GPU / TAG (24H)</span>
+                <span class="p-chip-val" id="cockpitDailyRate">—</span>
               </div>
               <div class="p-chip">
-                <span class="p-chip-label">PRO WOCHE (7T)</span>
-                <span class="p-chip-val" id="cockpitWeeklyRate">$0.00</span>
+                <span class="p-chip-label">GPU / WOCHE (7T)</span>
+                <span class="p-chip-val" id="cockpitWeeklyRate">—</span>
               </div>
               <div class="p-chip">
-                <span class="p-chip-label">PLATTE / MONAT</span>
-                <span class="p-chip-val" id="cockpitDiskMonthly">$0.00</span>
+                <span class="p-chip-label">SPEICHER / MONAT</span>
+                <span class="p-chip-val" id="cockpitDiskMonthly">—</span>
               </div>
               <div class="p-chip highlight">
                 <span class="p-chip-label">REICHWEITE</span>
-                <span class="p-chip-val" id="cockpitRunTimeRemaining">~55h GPU</span>
+                <span class="p-chip-val" id="cockpitRunTimeRemaining">—</span>
               </div>
             </div>
           </div>
@@ -312,9 +333,71 @@
 
   </div>
 
+  <dialog id="gpuPickerDialog" class="gpu-picker-dialog" aria-labelledby="gpuPickerTitle" aria-describedby="gpuPickerIntro">
+    <header class="gpu-picker-header">
+      <div><span class="gpu-picker-eyebrow">HARDWARE VERGLEICHEN · MINIMAX H3</span><h2 id="gpuPickerTitle">Deine nächste Grafikkarte.</h2>
+        <p id="gpuPickerIntro">Preis, Verfügbarkeit und Tempo vergleichen. Rechts eine Karte auswählen.</p></div>
+      <button id="closeGpuPickerBtn" class="close-btn" type="button" aria-label="GPU-Auswahl schließen">✕</button>
+    </header>
+    <div class="gpu-picker-controls">
+      <label class="gpu-search-label">Grafikkarte suchen<input id="gpuSearchInput" type="search" placeholder="z. B. A100, H100, L40S …" autocomplete="off"></label>
+      <label>Cloud<select id="gpuPickerCloud"><option value="ALL">Alle Clouds</option><option value="COMMUNITY">Community</option><option value="SECURE">Secure</option></select></label>
+      <label>Vergleich mit<select id="gpuReferenceSelect"><option value="NVIDIA A40">A40 · 1,0×</option></select></label>
+      <button id="gpuPickerRefresh" class="icon-btn" type="button">↻ Aktualisieren</button>
+    </div>
+    <div class="gpu-picker-filters">
+      <label>VRAM<select id="gpuMinVram"><option value="24">Ab 24 GB</option><option value="48" selected>Ab 48 GB · wie A40</option><option value="80">Ab 80 GB</option></select></label>
+      <label>Referenztempo<select id="gpuMinSpeed"><option value="0">Alle Tempostufen</option><option value="1.5">Mindestens 1,5×</option><option value="2">Mindestens 2×</option><option value="3">Mindestens 3×</option></select></label>
+      <label>Sortieren<select id="gpuSort"><option value="availability">Verfügbarkeit & Effizienz</option><option value="price">Preis: niedrig zuerst</option><option value="speed">Tempo: hoch zuerst</option><option value="efficiency">Effizienz: hoch zuerst</option><option value="vram">VRAM: viel zuerst</option></select></label>
+      <label class="gpu-stock-filter"><input id="gpuAvailableOnly" type="checkbox"> Nur verfügbare Karten</label>
+      <span id="gpuResultCount" class="gpu-result-count"></span>
+    </div>
+    <div class="gpu-benchmark-note"><strong>Tempo-Orientierung, keine MiniMax-Messung.</strong> <span id="gpuBenchmarkDescription">Ein einheitlicher Diffusions-Benchmark dient als Vergleich. 2× im Benchmark bedeutet nicht automatisch 2× schnelleres Video.</span> <a id="gpuBenchmarkSource" target="_blank" rel="noopener noreferrer">Messwerte & Quelle ↗</a></div>
+    <div id="gpuPickerMessage" class="gpu-picker-message" role="status" aria-live="polite"></div>
+    <div class="gpu-table-wrap" tabindex="0" aria-label="Vergleichstabelle, bei Bedarf horizontal scrollen">
+      <table class="gpu-comparison-table">
+        <thead><tr><th scope="col">Grafikkarte</th><th scope="col">VRAM</th><th scope="col">Verfügbarkeit</th><th scope="col">Preis / h</th><th scope="col">Referenztempo <small>FLUX-Benchmark</small></th><th scope="col">Effizienz <small>Tempo ÷ Preis/h</small></th><th scope="col" class="gpu-choice-heading">Auswahl</th></tr></thead>
+        <tbody id="gpuTableBody"></tbody>
+      </table>
+    </div>
+    <div class="gpu-picker-footnotes"><span><i class="gpu-dot available"></i> Verfügbar <i class="gpu-dot limited"></i> Wenige frei <i class="gpu-dot unavailable"></i> Nicht verfügbar <i class="gpu-dot unknown"></i> Unbekannt</span><span id="gpuCheckedAt"></span></div>
+    <details class="gpu-methodology"><summary>So liest du Tempo und Effizienz</summary><p>1,0× ist die gewählte Referenzkarte. Tempofaktor = Benchmark-Zeit der Referenz ÷ Benchmark-Zeit der Karte. Effizienz = Tempofaktor ÷ GPU-Stundenpreis; höher ist besser. Ohne Messwert oder Preis wird kein Faktor berechnet.</p><p>MiniMax H3 benötigt mehrere Modellkomponenten. Weniger VRAM als bei der A40 kann zusätzliches Auslagern in den Arbeitsspeicher erfordern. Der Bild-Benchmark bildet das nicht zuverlässig ab. Speicher- und weitere Pod-Kosten sind im GPU-Preisvergleich nicht enthalten. Bestand und Preise können sich bis zur Buchung ändern.</p></details>
+    <footer class="gpu-picker-footer"><div><strong id="gpuPendingName">Keine Karte gewählt</strong><p id="gpuPendingDetail">Die Auswahl gilt für die nächste Pod-Erstellung. Ein vorhandener Pod behält seine GPU.</p></div><div class="gpu-picker-footer-actions"><button id="cancelGpuPickerBtn" class="icon-btn" type="button">Abbrechen</button><button id="applyGpuPickerBtn" class="btn-action btn-primary" type="button" disabled>Auswahl übernehmen</button></div></footer>
+  </dialog>
+
+  <!-- GPU Out-of-Stock Modal: erscheint, wenn RunPod beim Buchen keine freie Instanz findet -->
+  <div class="modal-backdrop" id="gpuStockModal">
+    <div class="modal-dialog info-modal-dialog">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <span class="modal-title-icon">⛔</span>
+          <div>
+            <h3 class="card-title" id="gpuStockTitle">GPU ist aktuell ausgebucht</h3>
+            <span class="modal-subtitle">RunPod hat keine freie Instanz dieser Karte gefunden</span>
+          </div>
+        </div>
+        <button class="close-btn" id="closeGpuStockBtn">&times;</button>
+      </div>
+
+      <div class="modal-body-scrollable">
+        <div class="info-highlight-box">
+          <div class="info-highlight-title" id="gpuStockFailedGpu">–</div>
+          <p id="gpuStockDetail">–</p>
+        </div>
+
+        <div class="form-label" style="margin: 14px 0 8px;">Alternativen vergleichen:</div>
+        <div id="gpuStockAlternatives" style="display: flex; flex-direction: column; gap: 8px;"></div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 18px;">
+        <button class="icon-btn" id="retryGpuStockBtn">🔄 Erneut versuchen</button>
+        <button class="btn-action btn-primary" id="laterGpuStockBtn" style="padding: 8px 16px;">Später</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings Modal -->
-  <div class="modal-backdrop" id="settingsModal">
-    <div class="modal-dialog">
+  <div class="modal-backdrop" id="settingsModal">    <div class="modal-dialog">
       <div class="modal-header">
         <h3 class="card-title">Einstellungen</h3>
         <button class="close-btn" id="closeSettingsBtn">&times;</button>
@@ -417,18 +500,18 @@
               </tr>
               <tr>
                 <td><strong>Speicherkosten</strong></td>
-                <td><strong>~0,17 $/Tag</strong> (~5,25 $/Mo für 75 GB)</td>
+                <td><strong>Speicher wird weiter berechnet.</strong> Der Betrag hängt von Größe und Speichertyp ab; den aktuellen Tarif zeigt RunPod.</td>
                 <td><strong class="text-green">0,00 €</strong> (absoluter Null-Kosten-Modus)</td>
               </tr>
               <tr>
-                <td><strong>30 GB Modellgewichte</strong></td>
+                <td><strong>Gespeicherte Modelle</strong></td>
                 <td><span class="badge-preserved">✓ Bleiben erhalten</span> auf <code>/workspace</code></td>
                 <td><span class="badge-deleted">✕ Unwiderruflich gelöscht</span></td>
               </tr>
               <tr>
                 <td><strong>Wiederanlaufzeit</strong></td>
-                <td><strong>~45 Sekunden</strong> („Pod Aufwecken“)</td>
-                <td><strong>~5–6 Minuten</strong> (muss alles neu herunterladen)</td>
+                <td>Die vorhandene Umgebung wird wieder gestartet; die Dauer hängt vom Pod ab.</td>
+                <td>Die Umgebung wird neu eingerichtet; fehlende Modelle müssen bei Bedarf neu geladen werden.</td>
               </tr>
               <tr>
                 <td><strong>Wann nutzen?</strong></td>
@@ -448,14 +531,14 @@
           <div class="info-card-item">
             <h4>💡 Warum heißt es in der App „GPU Pausieren (Stop)“?</h4>
             <p>
-              In RunPod heißt der Befehl oft „Stop“. Weil Nutzer bei „Stop“ häufig befürchten, dass alles gelöscht wird, verwenden wir „GPU Pausieren“. Die teure A40-Grafikkarte wird abgeschaltet, aber deine fertig eingerichtete Umgebung und alle 30 GB heruntergeladenen Modelle bleiben für den nächsten Start eingefroren.
+              „GPU Pausieren“ stoppt den Pod und die GPU-Kosten. Dateien auf der Pod-Platte bleiben für den nächsten Start erhalten. Speicherkosten fallen weiter an.
             </p>
           </div>
 
           <div class="info-card-item">
             <h4>💰 Wirtschaftliche Faustregel:</h4>
             <p>
-              <strong>Unter der Woche / übers Wochenende:</strong> Immer <code>Pause</code> nutzen. Ein ganzes Wochenende Standby kostet nur ~35–50 Cent – dafür sparst du dir jedes Mal 6 Minuten Wartezeit und Netzwerk-Traffic.<br>
+              <strong>Weitere Nutzung geplant:</strong> Mit <code>Pause</code> bleiben Modelle und Umgebung erhalten. Vergleiche die Speicherkosten mit dem Aufwand einer späteren Neuinstallation.<br>
               <strong>Längere Pause (Urlaub, Wochen):</strong> Klicke auf <code>Pod Löschen</code> für echte 0,00 € laufende Kosten.
             </p>
           </div>
@@ -470,6 +553,8 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/gpu-performance.js"></script>
+  <script src="/static/js/gpu-picker.js"></script>
+  <script src="/static/js/app.js?v=6"></script>
 </body>
 </html>

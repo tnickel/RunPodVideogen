@@ -1,5 +1,59 @@
 // RunPod VideoGen Studio Frontend Controller
 
+// Only a price returned for the current pod may drive the cost projection.
+// The GPU catalogue/next-pod selection must never substitute a billed pod rate.
+window.PodCostDisplay = Object.freeze({
+  project(data, balance) {
+    const value = data.hourly_rate;
+    const hourlyRate = data.pod_id && data.hourly_rate_source === "runpod"
+      && typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? value : null;
+    return {
+      hourlyRate,
+      dailyRate: hourlyRate === null ? null : hourlyRate * 24,
+      weeklyRate: hourlyRate === null ? null : hourlyRate * 168,
+      hoursRemaining: hourlyRate > 0 && Number.isFinite(balance) && balance >= 0
+        ? balance / hourlyRate : null,
+      sessionCost: data.status !== "ERROR" && hourlyRate !== null
+        && typeof data.accumulated_cost === "number" && Number.isFinite(data.accumulated_cost) && data.accumulated_cost >= 0
+        ? data.accumulated_cost : null,
+    };
+  },
+});
+
+window.PodActionsDisplay = Object.freeze({
+  canPause(data) {
+    return Boolean(data.pod_id) && (data.status === "RUNNING" || data.status === "ERROR");
+  },
+});
+
+window.StartupProgressDisplay = Object.freeze({
+  project(data, now = Date.now() / 1000) {
+    const progress = data.startup_progress || {};
+    const starting = data.status === "STARTING" || data.status === "BOOTSTRAPPING";
+    const error = data.status === "ERROR";
+    const cancelled = progress.phase === "cancelled";
+    const active = starting && progress.active === true && !cancelled && progress.phase !== "error";
+    const timestamp = value => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+    const startedAt = timestamp(progress.started_at);
+    const updatedAt = timestamp(progress.updated_at);
+    const end = active ? now : updatedAt;
+    return {
+      visible: starting || error,
+      active,
+      error: error || progress.phase === "error",
+      label: typeof progress.label === "string" && progress.label.trim()
+        ? progress.label : (error ? "Start fehlgeschlagen" : "Start wird vorbereitet"),
+      detail: typeof progress.detail === "string" && progress.detail.trim()
+        ? progress.detail : (data.status_detail || "Warte auf die nächste Rückmeldung …"),
+      state: error || progress.phase === "error" ? "Fehler" : (cancelled ? "Abgebrochen" : (active ? "Läuft" : "Wartet")),
+      elapsedSeconds: startedAt !== null && end !== null ? Math.max(0, Math.floor(end - startedAt)) : null,
+      feedbackAgeSeconds: updatedAt === null ? null : Math.max(0, Math.floor(now - updatedAt)),
+      updatedAt,
+    };
+  },
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   // Ampel & Cost Cockpit Elements
   const costCockpitCard = document.querySelector(".cost-cockpit-card");
@@ -12,6 +66,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const ampelDesc = document.getElementById("ampelDesc");
 
   const cockpitHourlyRate = document.getElementById("cockpitHourlyRate");
+  const cockpitRateSource = document.getElementById("cockpitRateSource");
   const cockpitDailyRate = document.getElementById("cockpitDailyRate");
   const cockpitWeeklyRate = document.getElementById("cockpitWeeklyRate");
   const cockpitDiskMonthly = document.getElementById("cockpitDiskMonthly");
@@ -37,6 +92,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const guidanceTitle = document.getElementById("guidanceTitle");
   const guidanceDesc = document.getElementById("guidanceDesc");
   const guidanceAction = document.getElementById("guidanceAction");
+  const startupProgressPanel = document.getElementById("startupProgressPanel");
+  const startupPhaseLabel = document.getElementById("startupPhaseLabel");
+  const startupStateBadge = document.getElementById("startupStateBadge");
+  const startupProgressBar = document.getElementById("startupProgressBar");
+  const startupProgressDetail = document.getElementById("startupProgressDetail");
+  const startupElapsed = document.getElementById("startupElapsed");
+  const startupLastFeedback = document.getElementById("startupLastFeedback");
+  let startupStatusData = null;
 
   // Header & Status Elements
   const statusPill = document.getElementById("statusPill");
@@ -70,6 +133,21 @@ document.addEventListener("DOMContentLoaded", () => {
   const gpuSelect = document.getElementById("gpuSelect");
   const cloudTypeSelect = document.getElementById("cloudTypeSelect");
   const volumeDiskDisplay = document.getElementById("volumeDiskDisplay");
+
+  // GPU-Verfügbarkeit: Hinweiszeile, Aktualisieren-Button und "ausgebucht"-Modal
+  const gpuAvailabilityHint = document.getElementById("gpuAvailabilityHint");
+  const refreshGpuBtn = document.getElementById("refreshGpuBtn");
+  const gpuStockModal = document.getElementById("gpuStockModal");
+  const gpuStockFailedGpu = document.getElementById("gpuStockFailedGpu");
+  const gpuStockDetail = document.getElementById("gpuStockDetail");
+  const gpuStockAlternatives = document.getElementById("gpuStockAlternatives");
+  const retryGpuStockBtn = document.getElementById("retryGpuStockBtn");
+  const laterGpuStockBtn = document.getElementById("laterGpuStockBtn");
+  const closeGpuStockBtn = document.getElementById("closeGpuStockBtn");
+  let gpusCache = [];
+  let gpuFetchSequence = 0;
+  let gpuStockModalShown = false;
+  let gpuMarksRefreshedForError = false;
 
   const galleryGrid = document.getElementById("galleryGrid");
   const btnSyncNow = document.getElementById("btnSyncNow");
@@ -107,13 +185,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Local State
   let currentUptime = 0;
-  let currentHourlyRate = 0.34;
+  let currentHourlyRate = null;
   let timerInterval = null;
   let activeProxyUrl = null;
   let currentBalance = 0;
-
-  // RunPod Volume-Storage-Preis (zentrale Konstante, falls RunPod Preise ändert)
-  const RUNPOD_DISK_USD_PER_GB_MONTH = 0.07;
 
   // Format Seconds to HH:MM:SS
   function formatTime(seconds) {
@@ -128,9 +203,27 @@ document.addEventListener("DOMContentLoaded", () => {
     if (currentUptime > 0) {
       currentUptime++;
       sessionTimer.textContent = formatTime(currentUptime);
-      const cost = (currentUptime / 3600.0) * currentHourlyRate;
-      sessionCostDisplay.textContent = `$${cost.toFixed(4)}`;
+      const cost = currentHourlyRate === null ? null : (currentUptime / 3600.0) * currentHourlyRate;
+      sessionCostDisplay.textContent = cost === null ? "—" : `~$${cost.toFixed(4)}`;
     }
+  }
+
+  function renderStartupProgress() {
+    if (!startupStatusData || !startupProgressPanel) return;
+    const view = window.StartupProgressDisplay.project(startupStatusData);
+    startupProgressPanel.hidden = !view.visible;
+    if (!view.visible) return;
+    startupProgressPanel.classList.toggle("is-active", view.active);
+    startupProgressPanel.classList.toggle("is-error", view.error);
+    if (startupPhaseLabel.textContent !== view.label) startupPhaseLabel.textContent = view.label;
+    if (startupProgressDetail.textContent !== view.detail) startupProgressDetail.textContent = view.detail;
+    startupStateBadge.textContent = view.state;
+    startupProgressBar.setAttribute("aria-label", `${view.label}: ${view.state}`);
+    // No aria-valuenow: the installation has no measurable overall percentage.
+    startupElapsed.textContent = view.elapsedSeconds === null ? "—" : formatTime(view.elapsedSeconds);
+    startupLastFeedback.textContent = view.feedbackAgeSeconds === null
+      ? "Noch keine" : (view.feedbackAgeSeconds < 2 ? "Gerade eben" : `vor ${formatTime(view.feedbackAgeSeconds)}`);
+    startupLastFeedback.title = view.updatedAt === null ? "" : new Date(view.updatedAt * 1000).toLocaleTimeString("de-DE");
   }
 
   // Fetch Status & Update Cockpit
@@ -139,6 +232,8 @@ document.addEventListener("DOMContentLoaded", () => {
       const res = await fetch("/api/status");
       if (!res.ok) return;
       const data = await res.json();
+      startupStatusData = data;
+      renderStartupProgress();
 
       // Update Pill
       statusPill.className = `status-pill ${data.status}`;
@@ -158,44 +253,42 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
 
-      // Cost Calculation Variables
-      currentHourlyRate = data.hourly_rate || 0.34;
-      hourlyRateDisplay.textContent = `$${currentHourlyRate.toFixed(2)} /h`;
-      
-      const volumeGb = data.config && data.config.volume_disk_gb ? data.config.volume_disk_gb : 75;
-      const diskMonthly = volumeGb * RUNPOD_DISK_USD_PER_GB_MONTH; // ~$5.25 for 75GB
-      const diskDaily = diskMonthly / 30.0; // ~$0.175 / day
-      const diskWeekly = diskDaily * 7.0; // ~$1.225 / week
-      const diskHourly = diskMonthly / 720.0; // ~$0.00729 / h
+      // The reported GPU rate belongs to this pod, not the next-pod selection.
+      // Storage is separate; do not add an unrelated network-volume tariff.
+      const costs = window.PodCostDisplay.project(data, currentBalance);
+      currentHourlyRate = costs.hourlyRate;
+      hourlyRateDisplay.textContent = currentHourlyRate === null ? "— /h" : `$${currentHourlyRate.toFixed(3)} /h`;
 
+      const volumeGb = data.config && data.config.volume_disk_gb ? data.config.volume_disk_gb : 75;
       const status = data.status;
+      const hasPod = Boolean(data.pod_id);
+      const priceKnown = currentHourlyRate !== null;
+      cockpitHourlyRate.innerHTML = `${priceKnown ? `$${currentHourlyRate.toFixed(3)}` : "—"} <span class="rate-unit">/ Std.</span>`;
+      cockpitDailyRate.textContent = costs.dailyRate === null ? "—" : `$${costs.dailyRate.toFixed(2)}`;
+      cockpitWeeklyRate.textContent = costs.weeklyRate === null ? "—" : `$${costs.weeklyRate.toFixed(2)}`;
+      cockpitRunTimeRemaining.textContent = costs.hoursRemaining === null ? "—" : `~${costs.hoursRemaining.toFixed(1)}h GPU`;
+      cockpitDiskMonthly.textContent = hasPod ? "Separat" : "—";
+      cockpitDiskMonthly.title = hasPod ? "Zusätzliche Speicherkosten werden separat von RunPod berechnet." : "";
+      cockpitRateSource.textContent = priceKnown
+        ? `RunPod${data.pod_gpu_name ? ` · ${data.pod_gpu_name}` : ""} · GPU, zzgl. Speicher`
+        : "Pod-Preis wird abgefragt …";
 
       // ==========================================
       // AMPELSYSTEM & DICKE STATUSANZEIGE
       // ==========================================
       if (status === "RUNNING" || status === "STARTING" || status === "BOOTSTRAPPING") {
-        // 🔴 ROT: GPU Aktiv
-        ampelRed.classList.add("active");
-        ampelYellow.classList.remove("active");
+        // A booked pod may already incur costs while it is provisioning.
+        ampelRed.classList.toggle("active", hasPod);
+        ampelYellow.classList.toggle("active", !hasPod);
         ampelGreen.classList.remove("active");
-        if (costCockpitCard) costCockpitCard.className = "card cost-cockpit-card state-red";
+        if (costCockpitCard) costCockpitCard.className = `card cost-cockpit-card ${hasPod ? "state-red" : "state-yellow"}`;
 
-        ampelStatusTag.className = "ampel-status-tag red";
-        ampelStatusTag.textContent = "🔴 GPU AKTIV – RECHENZEIT LÄUFT";
-        ampelHeadline.textContent = "GPU rechnet aktuell";
-        ampelDesc.textContent = "Die Grafikkarte ist eingeschaltet und rechnet. Pausiere den Pod mit 'GPU Pausieren', sobald deine Videos generiert sind, um GPU-Kosten zu stoppen.";
-
-        const totalHourly = currentHourlyRate + diskHourly;
-        const totalDaily = (currentHourlyRate * 24) + diskDaily;
-        const totalWeekly = (currentHourlyRate * 168) + diskWeekly;
-
-        cockpitHourlyRate.innerHTML = `$${totalHourly.toFixed(3)} <span class="rate-unit">/ Std.</span>`;
-        cockpitDailyRate.textContent = `$${totalDaily.toFixed(2)}`;
-        cockpitWeeklyRate.textContent = `$${totalWeekly.toFixed(2)}`;
-        cockpitDiskMonthly.textContent = `$${diskMonthly.toFixed(2)}`;
-
-        const hoursLeft = currentHourlyRate > 0 ? (currentBalance / currentHourlyRate).toFixed(1) : "0";
-        cockpitRunTimeRemaining.textContent = `~${hoursLeft}h GPU`;
+        ampelStatusTag.className = `ampel-status-tag ${hasPod ? "red" : "yellow"}`;
+        ampelStatusTag.textContent = hasPod ? "🔴 POD GEBUCHT – GPU-KOSTEN" : "🟡 POD WIRD ANGEFRAGT";
+        ampelHeadline.textContent = status === "RUNNING" ? "GPU ist eingeschaltet" : "Pod wird eingerichtet";
+        ampelDesc.textContent = status === "RUNNING"
+          ? "Die GPU ist eingeschaltet und wird auch im Leerlauf berechnet. Pausiere den Pod mit 'GPU Pausieren', sobald deine Videos generiert sind."
+          : "RunPod stellt den Pod bereit. Ein gebuchter Pod kann bereits während der Einrichtung Kosten verursachen. Der Preis wird direkt beim aktuellen Pod abgefragt.";
 
       } else if (status === "STOPPED") {
         // 🟡 GELB: Standby (GPU aus, Modelle erhalten)
@@ -205,35 +298,36 @@ document.addEventListener("DOMContentLoaded", () => {
         if (costCockpitCard) costCockpitCard.className = "card cost-cockpit-card state-yellow";
 
         ampelStatusTag.className = "ampel-status-tag yellow";
-        ampelStatusTag.textContent = "🟡 STANDBY (GPU AUS, 30GB MODELLE ERHALTEN)";
-        ampelHeadline.textContent = "GPU pausiert (0,00 € GPU-Kosten)";
-        ampelDesc.textContent = `GPU ist abgeschaltet (0,00 $/h). Deine 30 GB MiniMax H3 Modellgewichte bleiben auf der ${volumeGb} GB Cloud-Platte gespeichert (~${(diskDaily * 100).toFixed(0)}¢/Tag), sodass du beim nächsten Klick sofort in 45s startklar bist!`;
+        ampelStatusTag.textContent = "🟡 STANDBY (GPU AUS, SPEICHER ERHALTEN)";
+        ampelHeadline.textContent = "GPU pausiert";
+        ampelDesc.textContent = `Die GPU ist abgeschaltet. Die ${volumeGb} GB Pod-Platte und gespeicherte Modelle bleiben erhalten. Für den Speicher fallen weiterhin Kosten bei RunPod an.`;
 
-        cockpitHourlyRate.innerHTML = `$${diskHourly.toFixed(3)} <span class="rate-unit">/ Std.</span>`;
-        cockpitDailyRate.textContent = `$${diskDaily.toFixed(2)}`;
-        cockpitWeeklyRate.textContent = `$${diskWeekly.toFixed(2)}`;
-        cockpitDiskMonthly.textContent = `$${diskMonthly.toFixed(2)}`;
-
-        const daysLeft = diskDaily > 0 ? (currentBalance / diskDaily).toFixed(0) : "0";
-        cockpitRunTimeRemaining.textContent = `~${daysLeft} Tage Standby`;
+        cockpitHourlyRate.innerHTML = '$0.000 <span class="rate-unit">/ Std. GPU</span>';
+        cockpitDailyRate.textContent = "$0.00";
+        cockpitWeeklyRate.textContent = "$0.00";
+        cockpitRunTimeRemaining.textContent = "—";
+        cockpitRateSource.textContent = "GPU pausiert · Speicherkosten separat";
 
       } else if (status === "ERROR") {
         // ⚠️ ERROR Zustand
-        ampelRed.classList.add("active");
+        ampelRed.classList.toggle("active", hasPod);
         ampelYellow.classList.remove("active");
-        ampelGreen.classList.remove("active");
-        if (costCockpitCard) costCockpitCard.className = "card cost-cockpit-card state-red";
+        ampelGreen.classList.toggle("active", !hasPod);
+        if (costCockpitCard) costCockpitCard.className = `card cost-cockpit-card ${hasPod ? "state-red" : "state-green"}`;
 
         ampelStatusTag.className = "ampel-status-tag red";
         ampelStatusTag.textContent = "⚠️ FEHLER IM POD-SETUP";
         ampelHeadline.textContent = "Status prüfen & intervenieren";
         ampelDesc.textContent = data.status_detail || "Beim Starten oder Ausführen des Pods ist ein Fehler aufgetreten. Überprüfe die Terminal-Logs unten oder lösche den Pod.";
 
-        cockpitHourlyRate.innerHTML = `$${currentHourlyRate.toFixed(3)} <span class="rate-unit">/ Std. (falls Pod läuft)</span>`;
+        cockpitHourlyRate.innerHTML = hasPod
+          ? `${priceKnown ? `$${currentHourlyRate.toFixed(3)}` : "—"} <span class="rate-unit">/ Std. GPU bei Betrieb</span>`
+          : '$0.000 <span class="rate-unit">/ Std.</span>';
         cockpitDailyRate.textContent = "-";
         cockpitWeeklyRate.textContent = "-";
-        cockpitDiskMonthly.textContent = `$${diskMonthly.toFixed(2)}`;
-        cockpitRunTimeRemaining.textContent = "Intervention nötig";
+        cockpitDiskMonthly.textContent = hasPod ? "Separat" : "$0.00";
+        cockpitRunTimeRemaining.textContent = hasPod ? "Status prüfen" : "Kein Pod";
+        if (!hasPod) cockpitRateSource.textContent = "Kein Pod gebucht · keine Kosten für diesen Pod";
 
       } else {
         // 🟢 GRÜN: Null-Kosten (Aus & Gelöscht)
@@ -245,15 +339,15 @@ document.addEventListener("DOMContentLoaded", () => {
         ampelStatusTag.className = "ampel-status-tag green";
         ampelStatusTag.textContent = "🟢 0,- € NULL-KOSTEN MODUS";
         ampelHeadline.textContent = "Keine laufenden Kosten";
-        ampelDesc.textContent = "Es ist aktuell kein Pod aktiv und kein Cloud-Speicher reserviert. Dein Guthaben bleibt zu 100% unangetastet.";
+        ampelDesc.textContent = "Für diesen Pod ist keine GPU und kein Pod-Speicher reserviert.";
 
         cockpitHourlyRate.innerHTML = `$0.000 <span class="rate-unit">/ Std.</span>`;
         cockpitDailyRate.textContent = "$0.00";
         cockpitWeeklyRate.textContent = "$0.00";
         cockpitDiskMonthly.textContent = "$0.00";
 
-        const potentialHours = currentHourlyRate > 0 ? (currentBalance / currentHourlyRate).toFixed(0) : "54";
-        cockpitRunTimeRemaining.textContent = `~${potentialHours}h GPU möglich`;
+        cockpitRunTimeRemaining.textContent = "Kein Pod";
+        cockpitRateSource.textContent = "Kein Pod gebucht";
       }
 
       // Live Session Timer
@@ -264,7 +358,7 @@ document.addEventListener("DOMContentLoaded", () => {
           currentUptime = serverUptime;
           sessionTimer.textContent = formatTime(currentUptime);
         }
-        sessionCostDisplay.textContent = `$${(data.accumulated_cost || 0).toFixed(4)}`;
+        sessionCostDisplay.textContent = costs.sessionCost === null ? "—" : `~$${costs.sessionCost.toFixed(4)}`;
         if (!timerInterval) {
           timerInterval = setInterval(tickTimer, 1000);
         }
@@ -273,6 +367,10 @@ document.addEventListener("DOMContentLoaded", () => {
           clearInterval(timerInterval);
           timerInterval = null;
         }
+        currentUptime = typeof data.uptime_seconds === "number" && Number.isFinite(data.uptime_seconds)
+          ? Math.max(0, data.uptime_seconds) : 0;
+        sessionTimer.textContent = data.status === "ERROR" ? "Status unklar" : formatTime(currentUptime);
+        sessionCostDisplay.textContent = costs.sessionCost === null ? "—" : `~$${costs.sessionCost.toFixed(4)}`;
         if (data.status === "OFFLINE" || data.status === "TERMINATED") {
           currentUptime = 0;
           sessionTimer.textContent = "00:00:00";
@@ -291,12 +389,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Hardware / AutoShutdown
       if (data.config) {
-        if (data.config.gpu_type_id && gpuSelect && Array.from(gpuSelect.options).some(o => o.value === data.config.gpu_type_id)) {
-          if (document.activeElement !== gpuSelect) {
-            gpuSelect.value = data.config.gpu_type_id;
-          }
-        }
-        if (data.config.cloud_type && cloudTypeSelect && document.activeElement !== cloudTypeSelect) {
+        if (data.config.gpu_type_id) setSelectedGpu(data.config.gpu_type_id);
+        if (data.config.cloud_type && cloudTypeSelect && !cloudTypeSelect.disabled && document.activeElement !== cloudTypeSelect) {
           cloudTypeSelect.value = data.config.cloud_type;
         }
         if (data.config.auto_shutdown_minutes !== undefined && document.activeElement !== autoShutdownSelect) {
@@ -327,39 +421,54 @@ document.addEventListener("DOMContentLoaded", () => {
       if (data.status === "RUNNING") {
         btnStart.disabled = true;
         btnStart.innerHTML = "<span>🚀</span> Pod läuft";
-        btnPause.disabled = false;
         btnTerminate.disabled = false;
         btnOpenWebUI.disabled = false;
-        if (btnCockpitPause) btnCockpitPause.style.display = "inline-flex";
         if (btnCockpitResume) btnCockpitResume.style.display = "none";
         if (btnCockpitTerminate) btnCockpitTerminate.style.display = "inline-flex";
       } else if (data.status === "STARTING" || data.status === "BOOTSTRAPPING") {
         btnStart.disabled = true;
         btnStart.innerHTML = "<span>⏳</span> Startet...";
-        btnPause.disabled = true;
         btnTerminate.disabled = false;
         btnOpenWebUI.disabled = true;
-        if (btnCockpitPause) btnCockpitPause.style.display = "none";
         if (btnCockpitResume) btnCockpitResume.style.display = "none";
         if (btnCockpitTerminate) btnCockpitTerminate.style.display = "inline-flex";
       } else if (data.status === "STOPPED") {
         btnStart.disabled = false;
-        btnStart.innerHTML = "<span>⚡</span> Pod Aufwecken (Resume 45s)";
-        btnPause.disabled = true;
+        btnStart.innerHTML = "<span>⚡</span> Pod Aufwecken (Resume)";
         btnTerminate.disabled = false;
         btnOpenWebUI.disabled = true;
-        if (btnCockpitPause) btnCockpitPause.style.display = "none";
         if (btnCockpitResume) btnCockpitResume.style.display = "inline-flex";
         if (btnCockpitTerminate) btnCockpitTerminate.style.display = "inline-flex";
       } else { // OFFLINE, TERMINATED, ERROR
         btnStart.disabled = false;
         btnStart.innerHTML = "<span>🚀</span> Pod Starten";
-        btnPause.disabled = true;
         btnTerminate.disabled = !data.pod_id;
         btnOpenWebUI.disabled = true;
-        if (btnCockpitPause) btnCockpitPause.style.display = "none";
         if (btnCockpitResume) btnCockpitResume.style.display = "none";
         if (btnCockpitTerminate) btnCockpitTerminate.style.display = data.pod_id ? "inline-flex" : "none";
+      }
+      // A setup error does not stop RunPod billing; keep Stop available for that pod.
+      const canPause = window.PodActionsDisplay.canPause(data);
+      btnPause.disabled = !canPause;
+      if (btnCockpitPause) btnCockpitPause.style.display = canPause ? "inline-flex" : "none";
+
+      // GPU ausgebucht: Dropdown-Markierungen auffrischen und Alternativ-Modal zeigen
+      const outOfStockNow = data.status === "ERROR" && (
+        isOutOfStockText(data.status_detail || "") ||
+        (data.recent_logs || []).some(l => isOutOfStockText(l))
+      );
+      if (data.status !== "ERROR") {
+        gpuStockModalShown = false;
+        gpuMarksRefreshedForError = false;
+      } else {
+        if (outOfStockNow && !gpuMarksRefreshedForError) {
+          gpuMarksRefreshedForError = true;
+          fetchGpus();
+        }
+        if (outOfStockNow && !gpuStockModalShown && gpusCache.length) {
+          gpuStockModalShown = true;
+          showGpuStockModal(data.config && data.config.gpu_type_id, data.status_detail || "");
+        }
       }
 
       // Update Step-by-Step Guidance & Stepper
@@ -397,34 +506,15 @@ document.addEventListener("DOMContentLoaded", () => {
       if (guidanceIcon) guidanceIcon.textContent = "⚠️";
 
       if (isOutOfStock) {
-        if (guidanceTitle) guidanceTitle.textContent = "Start abgebrochen: RTX 4090 aktuell ausgebucht!";
-        if (guidanceDesc) guidanceDesc.textContent = "In der Community Cloud ist die 4090 gerade belegt (0€ Kosten). Wechsle direkt auf die NVIDIA A40 (48 GB VRAM, ~$0.35/h, doppelt so viel VRAM!) oder versuche Secure Cloud:";
+        if (guidanceTitle) guidanceTitle.textContent = "Start abgebrochen: Gewählte GPU aktuell ausgebucht";
+        if (guidanceDesc) guidanceDesc.textContent = "RunPod konnte keine passende Instanz bereitstellen. Vergleiche die aktuelle Verfügbarkeit und Preise anderer Grafikkarten oder Clouds.";
         if (guidanceAction) {
           guidanceAction.innerHTML = `
-            <button class="guidance-btn" id="btnGuidanceA40">👉 Auf A40 (48GB) wechseln & Starten</button>
-            <button class="guidance-btn btn-secondary" id="btnGuidanceSecure">🔒 Secure Cloud versuchen</button>
+            <button class="guidance-btn" id="btnGuidanceCompare">Grafikkarten vergleichen</button>
             <button class="guidance-btn btn-secondary" id="btnGuidanceRetry">🔄 Nochmal versuchen</button>
           `;
 
-          document.getElementById("btnGuidanceA40")?.addEventListener("click", async () => {
-            gpuSelect.value = "NVIDIA A40";
-            await fetch("/api/config", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ gpu_type_id: "NVIDIA A40" })
-            });
-            btnStart.click();
-          });
-
-          document.getElementById("btnGuidanceSecure")?.addEventListener("click", async () => {
-            cloudTypeSelect.value = "SECURE";
-            await fetch("/api/config", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ cloud_type: "SECURE" })
-            });
-            btnStart.click();
-          });
+          document.getElementById("btnGuidanceCompare")?.addEventListener("click", () => window.GpuPicker.open());
 
           document.getElementById("btnGuidanceRetry")?.addEventListener("click", () => {
             btnStart.click();
@@ -454,7 +544,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (guidanceBanner) guidanceBanner.className = "guidance-banner info";
       if (guidanceIcon) guidanceIcon.textContent = "⏳";
       if (guidanceTitle) guidanceTitle.textContent = "Schritt 1 von 4: Pod wird bereitgestellt...";
-      if (guidanceDesc) guidanceDesc.textContent = "RunPod weist die GPU zu und startet den PyTorch-Container (ca. 30–60 Sek.). Bitte kurz warten...";
+      if (guidanceDesc) guidanceDesc.textContent = "RunPod weist die GPU zu und startet den Container. Den aktuellen Schritt und die letzte Rückmeldung siehst du im Startfortschritt.";
       if (guidanceAction) guidanceAction.innerHTML = `<span style="font-size:0.75rem; color:var(--primary); font-weight:700;">⏳ Cloud-Provisionierung läuft...</span>`;
 
     } else if (status === "BOOTSTRAPPING") {
@@ -473,8 +563,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
       if (guidanceBanner) guidanceBanner.className = "guidance-banner info";
       if (guidanceIcon) guidanceIcon.textContent = "⚙️";
-      if (guidanceTitle) guidanceTitle.textContent = "Schritt 2 von 4: Wan2GP & MiniMax H3 Modell einrichten...";
-      if (guidanceDesc) guidanceDesc.textContent = "Container verbunden! Wan2GP wird eingerichtet. Beim 1. Mal werden Basisdateien auf dein Volume geladen. Siehe Terminal unten für Live-Logs:";
+      if (guidanceTitle) guidanceTitle.textContent = "Schritt 2 von 4: Wan2GP einrichten und starten …";
+      if (guidanceDesc) guidanceDesc.textContent = "Die Umgebung wird geprüft, fehlende Komponenten werden installiert und die WebUI gestartet. Einzelheiten stehen im Startfortschritt und Live-Protokoll.";
       if (guidanceAction) {
         guidanceAction.innerHTML = `<button class="guidance-btn" id="btnGuidanceScrollTerm">💻 Terminal öffnen</button>`;
         document.getElementById("btnGuidanceScrollTerm")?.addEventListener("click", () => {
@@ -531,8 +621,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
       if (guidanceBanner) guidanceBanner.className = "guidance-banner warning";
       if (guidanceIcon) guidanceIcon.textContent = "🟡";
-      if (guidanceTitle) guidanceTitle.textContent = "Standby aktiv (GPU aus, 30 GB Modelle erhalten):";
-      if (guidanceDesc) guidanceDesc.textContent = "GPU ist aus (0,00 $/h). Deine 30 GB MiniMax H3 Modelle liegen sicher auf der Cloud-Platte (~17¢/Tag). Klicke auf 'Pod Aufwecken', um in 45s weiterzuarbeiten:";
+      if (guidanceTitle) guidanceTitle.textContent = "Standby aktiv (GPU aus, gespeicherte Modelle erhalten):";
+      if (guidanceDesc) guidanceDesc.textContent = "Die GPU ist aus. Die Pod-Platte bleibt erhalten und wird weiter berechnet. Klicke auf 'Pod Aufwecken', um die Umgebung erneut zu starten.";
       if (guidanceAction) {
         guidanceAction.innerHTML = `<button class="guidance-btn" id="btnGuidanceResume" style="background:var(--warning); color:#451a03; font-weight:800;">⚡ Pod Aufwecken (Resume)</button>`;
         document.getElementById("btnGuidanceResume")?.addEventListener("click", () => {
@@ -552,7 +642,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (guidanceBanner) guidanceBanner.className = "guidance-banner info";
       if (guidanceIcon) guidanceIcon.textContent = "💡";
       if (guidanceTitle) guidanceTitle.textContent = "Schritt 1 von 4: Pod buchen & starten";
-      if (guidanceDesc) guidanceDesc.textContent = "Wähle links deine GPU (Tipp: NVIDIA A40 mit 48 GB VRAM für 0,35 $/h ist sofort frei) und klicke auf '🚀 Pod Starten'.";
+      if (guidanceDesc) guidanceDesc.textContent = "Vergleiche über die GPU-Auswahl Preise und Verfügbarkeit. Übernimm eine Karte und klicke anschließend auf '🚀 Pod Starten'.";
       if (guidanceAction) {
         guidanceAction.innerHTML = `<button class="guidance-btn" id="btnGuidanceStart">🚀 Pod Starten</button>`;
         document.getElementById("btnGuidanceStart")?.addEventListener("click", () => {
@@ -562,36 +652,92 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Fetch Available GPUs
+  function setSelectedGpu(id) {
+    if (!Array.from(gpuSelect.options).some(option => option.value === id)) {
+      gpuSelect.appendChild(new Option(id, id));
+    }
+    gpuSelect.value = id;
+    document.getElementById("selectedGpuName").textContent = gpusCache.find(gpu => gpu.id === id)?.displayName || id;
+  }
+
+  window.GpuPicker.init({
+    getSelected: () => gpuSelect.value,
+    getCloud: () => cloudTypeSelect.value,
+    onSaved: (id, cloud) => {
+      setSelectedGpu(id);
+      cloudTypeSelect.value = cloud;
+      fetchGpus();
+      fetchStatus();
+    }
+  });
+
+  // Read current prices/stock without discarding failed booking observations.
   async function fetchGpus() {
+    const sequence = ++gpuFetchSequence;
+    const cloud = cloudTypeSelect.value;
     try {
-      const res = await fetch("/api/gpus");
-      if (!res.ok) return;
+      const res = await fetch(`/api/gpus?cloud_type=${encodeURIComponent(cloud)}`);
+      if (!res.ok) throw new Error("GPU-Abfrage fehlgeschlagen");
       const data = await res.json();
-      if (!data.gpus || !data.gpus.length) return;
+      if (sequence !== gpuFetchSequence || cloud !== cloudTypeSelect.value) return;
+      if (!Array.isArray(data.gpus)) throw new Error("GPU-Liste fehlt");
 
-      const currentVal = gpuSelect.value;
-      gpuSelect.innerHTML = "";
-      data.gpus.forEach(g => {
-        const opt = document.createElement("option");
-        opt.value = g.id;
-        const badge = g.id === "NVIDIA A40" ? " ⭐ (Empfohlen)" : "";
-        opt.textContent = `${g.displayName || g.id} (${g.vram} GB)${badge} • Community: ${commPrice}/h | Secure: ${secPrice}/h`;
-        gpuSelect.appendChild(opt);
-      });
-
-      // Restore selection if exists (preferred default: NVIDIA A40)
-      if (Array.from(gpuSelect.options).some(o => o.value === currentVal)) {
-        gpuSelect.value = currentVal;
-      } else if (Array.from(gpuSelect.options).some(o => o.value === "NVIDIA A40")) {
-        gpuSelect.value = "NVIDIA A40";
-      } else if (Array.from(gpuSelect.options).some(o => o.value === "NVIDIA GeForce RTX 4090")) {
-        gpuSelect.value = "NVIDIA GeForce RTX 4090";
+      gpusCache = data.gpus;
+      setSelectedGpu(gpuSelect.value);
+      const availCount = data.gpus.filter(g => ["available", "limited"].includes(g.availability)).length;
+      const unknownCount = data.gpus.filter(g => g.availability === "unknown").length;
+      if (gpuAvailabilityHint) {
+        gpuAvailabilityHint.textContent = `${availCount} verfügbar · ${unknownCount} mit unbekanntem Bestand · Details im Vergleich`;
       }
     } catch (err) {
+      if (sequence !== gpuFetchSequence) return;
+      if (gpuAvailabilityHint) gpuAvailabilityHint.textContent = "Preise und Verfügbarkeit konnten nicht aktualisiert werden.";
       console.error("GPU fetch error:", err);
     }
   }
+
+  // Booking failures can still occur after a positive stock snapshot.
+  function isOutOfStockText(text) {
+    const t = (text || "").toLowerCase();
+    return t.includes("instances available") || t.includes("sold out") || t.includes("ausgebucht");
+  }
+
+  function closeGpuStockModal() {
+    gpuStockModal.classList.remove("active");
+  }
+
+  function showGpuStockModal(failedGpuId, detail) {
+    gpuStockFailedGpu.textContent = `⛔ ${failedGpuId || "Gewählte GPU"} ist gerade ausgebucht`;
+    gpuStockDetail.textContent = detail || "RunPod hat keine freie Instanz gefunden. Wähle eine Alternative oder versuche es später erneut.";
+
+    gpuStockAlternatives.replaceChildren();
+    const compare = document.createElement("button");
+    compare.className = "guidance-btn";
+    compare.textContent = "Grafikkarten, Preise und Verfügbarkeit vergleichen";
+    compare.addEventListener("click", () => {
+      closeGpuStockModal();
+      window.GpuPicker.open();
+    });
+    gpuStockAlternatives.appendChild(compare);
+
+    gpuStockModal.classList.add("active");
+  }
+
+  if (refreshGpuBtn) {
+    refreshGpuBtn.addEventListener("click", async () => {
+      refreshGpuBtn.disabled = true;
+      await fetchGpus();
+      refreshGpuBtn.disabled = false;
+    });
+  }
+
+  closeGpuStockBtn?.addEventListener("click", closeGpuStockModal);
+  laterGpuStockBtn?.addEventListener("click", closeGpuStockModal);
+  retryGpuStockBtn?.addEventListener("click", () => {
+    closeGpuStockModal();
+    // Explicit retry requested by the user.
+    btnStart.click();
+  });
 
   // Fetch Video Gallery
   async function fetchVideos() {
@@ -824,8 +970,8 @@ document.addEventListener("DOMContentLoaded", () => {
   btnPause.addEventListener("click", async () => {
     const msg = "GPU pausieren (Stop Pod)?\n\n" +
                 "✓ Die GPU-Stundenkosten stoppen sofort (0,00 $/h).\n" +
-                "✓ Deine 30 GB MiniMax H3 Modellgewichte bleiben auf der Cloud-Platte erhalten (~17¢/Tag).\n" +
-                "✓ Beim nächsten Start bist du in 45 Sekunden startklar!";
+                "✓ Gespeicherte Modelle bleiben auf der Pod-Platte erhalten.\n" +
+                "✓ Die Speicherkosten laufen weiter. Die Wiederanlaufzeit hängt vom Pod und seiner Umgebung ab.";
     if (!confirm(msg)) return;
     try {
       const res = await fetch("/api/pod/stop", { method: "POST" });
@@ -840,8 +986,8 @@ document.addEventListener("DOMContentLoaded", () => {
   btnTerminate.addEventListener("click", async () => {
     const msg = "⚠️ ACHTUNG: POD WIRKLICH UNWIDERRUFLICH LÖSCHEN?\n\n" +
                 "• Die Standby-Kosten sinken auf exakt 0,00 €.\n" +
-                "• ABER: Das gesamte Cloud-Volume und die 30 GB heruntergeladenen MiniMax H3 Modellgewichte werden GELÖSCHT!\n" +
-                "• Beim nächsten Start müssen alle 30 GB Modelle neu heruntergeladen werden (~6 Minuten Bootzeit).\n\n" +
+                "• Das Pod-Volume und die dort heruntergeladenen Modelle werden GELÖSCHT!\n" +
+                "• Beim nächsten Start muss die Umgebung neu eingerichtet werden; fehlende Modelle werden bei Bedarf erneut heruntergeladen.\n\n" +
                 "TIPP: Normalerweise reicht 'GPU Pausieren' völlig aus, um die GPU-Kosten zu stoppen und die Modelle zu behalten.\n\n" +
                 "Möchtest du den Pod trotzdem endgültig löschen?";
     if (!confirm(msg)) return;
@@ -933,21 +1079,21 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Hardware change
-  gpuSelect.addEventListener("change", async () => {
-    await fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ gpu_type_id: gpuSelect.value })
-    });
-  });
-
   cloudTypeSelect.addEventListener("change", async () => {
-    await fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cloud_type: cloudTypeSelect.value })
-    });
+    cloudTypeSelect.disabled = true;
+    try {
+      const response = await fetch("/api/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cloud_type: cloudTypeSelect.value })
+      });
+      if (!response.ok) throw new Error("Cloud-Auswahl konnte nicht gespeichert werden.");
+      await fetchGpus();
+    } catch (error) {
+      gpuAvailabilityHint.textContent = error.message;
+      await fetchStatus();
+    } finally {
+      cloudTypeSelect.disabled = false;
+    }
   });
 
   // Explorer Open
@@ -1026,11 +1172,11 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // Init
-  fetchStatus();
-  fetchGpus();
+  fetchStatus().then(fetchGpus);
   fetchVideos();
   connectLogsWebSocket();
 
   setInterval(fetchStatus, 3000);
+  setInterval(renderStartupProgress, 1000);
   setInterval(fetchVideos, 10000);
 });

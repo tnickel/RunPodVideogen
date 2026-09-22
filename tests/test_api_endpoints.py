@@ -143,3 +143,132 @@ def test_pod_start_rejected_in_invalid_state(client):
     res = client.post("/api/pod/start")
 
     assert res.status_code == 400
+
+
+# ------------------------------------------------------- GPU-Verfügbarkeit
+
+class _FakeGpuClient:
+    """Ersetzt RunPodClient in /api/gpus (kein Netzwerkzugriff im Test)."""
+
+    def __init__(self, gpus):
+        self._gpus = gpus
+
+    def get_gpu_types(self):
+        return self._gpus
+
+
+def test_gpus_endpoint_marks_learned_out_of_stock(client, api_env, monkeypatch):
+    """Vergangene Buchungsfehler sind erkennbar, ohne andere GPUs grün zu raten."""
+    srv = api_env["server"]
+    gpus = [
+        {"id": "NVIDIA A40", "displayName": "A40", "memoryInGb": 48,
+         "communityPrice": 0.35, "securePrice": 0.49},
+        {"id": "NVIDIA GeForce RTX 4090", "displayName": "RTX 4090", "memoryInGb": 24,
+         "communityPrice": 0.34, "securePrice": 0.74},
+    ]
+    monkeypatch.setattr(srv.orchestrator, "get_client", lambda: _FakeGpuClient(gpus))
+    srv.orchestrator.mark_gpu_unavailable("NVIDIA A40")
+
+    res = client.get("/api/gpus")
+
+    assert res.status_code == 200
+    gpus_out = res.json()["gpus"]
+    by_id = {g["id"]: g for g in gpus_out}
+    assert by_id["NVIDIA A40"]["available"] is False
+    assert by_id["NVIDIA A40"]["availability_source"] == "recent_booking_failure"
+    assert by_id["NVIDIA GeForce RTX 4090"]["available"] is None
+    assert by_id["NVIDIA GeForce RTX 4090"]["availability"] == "unknown"
+    # Vergriffene Karten werden ans Ende sortiert
+    assert gpus_out[-1]["id"] == "NVIDIA A40"
+
+
+def test_gpu_availability_reset_endpoint(client, api_env):
+    srv = api_env["server"]
+    srv.orchestrator.mark_gpu_unavailable("NVIDIA A40")
+
+    res = client.post("/api/gpus/availability/reset")
+
+    assert res.status_code == 200
+    assert res.json()["success"] is True
+    assert srv.orchestrator.get_gpu_availability() == {}
+
+
+def test_gpus_uses_cloud_query_and_reports_metadata(client, api_env, monkeypatch):
+    srv = api_env["server"]
+    cm.update_config({"cloud_type": "COMMUNITY"})
+    gpus = [{"id": "NVIDIA A40", "displayName": "A40", "memoryInGb": 48,
+             "communityPrice": 0.35, "securePrice": 0.49,
+             "communityStock": {"stockStatus": "Low", "uninterruptablePrice": 0.35},
+             "secureStock": {"stockStatus": "High", "uninterruptablePrice": 0.49}}]
+    monkeypatch.setattr(srv.orchestrator, "get_client", lambda: _FakeGpuClient(gpus))
+
+    data = client.get("/api/gpus?cloud_type=SECURE").json()
+    gpu = data["gpus"][0]
+    assert data["cloud_type"] == gpu["cloud_type"] == "SECURE"
+    assert data["checked_at"].endswith("+00:00")
+    assert data["availability_notice"]
+    assert gpu["hourly_price"] == 0.49
+    assert gpu["availability"] == "available"
+    assert client.get("/api/gpus").json()["gpus"][0]["availability"] == "limited"
+    assert cm.load_config()["cloud_type"] == "COMMUNITY"
+
+
+def test_gpus_live_stock_takes_precedence_over_old_booking_failure(client, api_env, monkeypatch):
+    srv = api_env["server"]
+    gpus = [{"id": "NVIDIA A40", "displayName": "A40", "memoryInGb": 48,
+             "secureStock": {"stockStatus": "High", "uninterruptablePrice": 0.49}}]
+    monkeypatch.setattr(srv.orchestrator, "get_client", lambda: _FakeGpuClient(gpus))
+    srv.orchestrator.mark_gpu_unavailable("NVIDIA A40")
+
+    gpu = client.get("/api/gpus").json()["gpus"][0]
+    assert gpu["availability"] == "available"
+    assert gpu["availability_source"] == "runpod_live"
+    # Reading fresh stock must not silently reset the learned error cache.
+    assert "NVIDIA A40" in srv.orchestrator.get_gpu_availability()
+
+
+def test_gpus_hide_incompatible_amd_and_low_memory_cards(client, api_env, monkeypatch):
+    srv = api_env["server"]
+    gpus = [{"id": "AMD Instinct MI300X OAM", "displayName": "MI300X", "memoryInGb": 192},
+            {"id": "NVIDIA RTX A4000", "displayName": "A4000", "memoryInGb": 16},
+            {"id": "NVIDIA A40", "displayName": "A40", "memoryInGb": 48}]
+    monkeypatch.setattr(srv.orchestrator, "get_client", lambda: _FakeGpuClient(gpus))
+    assert [gpu["id"] for gpu in client.get("/api/gpus").json()["gpus"]] == ["NVIDIA A40"]
+
+
+def test_gpus_reject_invalid_cloud_without_network(client):
+    assert client.get("/api/gpus?cloud_type=invalid").status_code == 400
+
+
+def test_gpus_does_not_apply_booking_failure_to_another_cloud(client, api_env, monkeypatch):
+    srv = api_env["server"]
+    cm.update_config({"cloud_type": "COMMUNITY"})
+    srv.orchestrator.mark_gpu_unavailable("NVIDIA A40")
+    gpus = [{"id": "NVIDIA A40", "displayName": "A40", "memoryInGb": 48}]
+    monkeypatch.setattr(srv.orchestrator, "get_client", lambda: _FakeGpuClient(gpus))
+    gpu = client.get("/api/gpus?cloud_type=SECURE").json()["gpus"][0]
+    assert gpu["availability"] == "unknown"
+
+
+def test_config_cloud_change_resets_old_booking_failures(client, api_env):
+    srv = api_env["server"]
+    cm.update_config({"cloud_type": "COMMUNITY"})
+    srv.orchestrator.mark_gpu_unavailable("NVIDIA A40")
+
+    response = client.post("/api/config", json={"cloud_type": "SECURE"})
+
+    assert response.status_code == 200
+    assert cm.load_config()["cloud_type"] == "SECURE"
+    assert srv.orchestrator.get_gpu_availability() == {}
+
+
+def test_config_save_without_cloud_change_preserves_booking_failures(client, api_env):
+    srv = api_env["server"]
+    cm.update_config({"cloud_type": "COMMUNITY"})
+    srv.orchestrator.mark_gpu_unavailable("NVIDIA A40")
+
+    for update in ({"cloud_type": "COMMUNITY"}, {"gpu_type_id": "NVIDIA RTX A6000"},
+                   {"cloud_type": "community"}):
+        response = client.post("/api/config", json=update)
+        assert response.status_code == 200
+        assert "NVIDIA A40" in srv.orchestrator.get_gpu_availability()

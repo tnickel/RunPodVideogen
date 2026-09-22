@@ -401,7 +401,58 @@ body {
   background: var(--danger);
   border-color: var(--danger);
   color: #fff;
-  animation: pulse-step 1.2s infinite;
+  animation: none;
+}
+
+/* Real startup stages; the moving bar deliberately has no percentage. */
+.startup-progress {
+  margin-top: 10px;
+  padding: 12px 14px 10px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.startup-progress[hidden] { display: none; }
+.startup-progress-header, .startup-phase, .startup-times {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.startup-progress-header { justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+.startup-phase { flex-wrap: wrap; min-width: 0; }
+.startup-caption { color: var(--text-dim); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.07em; }
+.startup-phase strong { font-size: 0.8rem; color: var(--text-main); }
+.startup-state-badge {
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.16);
+  padding: 3px 8px;
+  color: #c7d2fe;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+.startup-times { margin: 0; gap: 16px; flex-wrap: wrap; }
+.startup-times div { display: flex; gap: 6px; align-items: baseline; }
+.startup-times dt { color: var(--text-dim); font-size: 0.68rem; }
+.startup-times dd { margin: 0; color: var(--text-main); font-size: 0.7rem; font-variant-numeric: tabular-nums; }
+.startup-progress-track { margin: 10px 0 8px; height: 5px; background: rgba(148, 163, 184, 0.13); border-radius: 999px; overflow: hidden; }
+.startup-progress-track span { display: block; height: 100%; width: 28%; background: #818cf8; border-radius: inherit; opacity: 0.5; }
+.startup-progress.is-active .startup-progress-track span { opacity: 1; animation: startup-sweep 2.3s ease-in-out infinite; }
+.startup-detail { margin: 0; font-family: var(--font-mono); color: var(--text-muted); font-size: 0.71rem; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
+.startup-progress.is-error { border-color: rgba(239, 68, 68, 0.35); background: rgba(127, 29, 29, 0.08); }
+.startup-progress.is-error .startup-state-badge { background: rgba(239, 68, 68, 0.15); color: #fca5a5; }
+.startup-progress.is-error .startup-progress-track span { animation: none; width: 100%; background: #f87171; opacity: 0.45; }
+@keyframes startup-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(360%); }
+}
+@media (max-width: 600px) {
+  .startup-progress { padding: 10px; }
+  .startup-times { width: 100%; justify-content: space-between; gap: 8px; }
+  .startup-caption { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .startup-progress.is-active .startup-progress-track span { animation: none; width: 100%; background: repeating-linear-gradient(135deg, #818cf8 0 8px, #4f46e5 8px 16px); }
+  .step-item.active .step-num { animation: none; }
 }
 
 /* Dashboard Rows */
@@ -1389,4 +1440,155 @@ body {
   padding-top: 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   margin-top: 4px;
+}
+
+/* ===== GPU-Verfügbarkeit im Dropdown ===== */
+/* Farbmarkierung je Option (Chromium/Edge rendern Hintergrund+Farbe von <option>) */
+select.form-select-compact option.gpu-opt-available {
+  color: #4ade80;
+  background-color: #0f2018;
+}
+select.form-select-compact option.gpu-opt-unavailable {
+  color: #7c8593;
+  background-color: #1a2230;
+}
+select.form-select-compact option.gpu-opt-unavailable:checked {
+  background-color: #26303f;
+}
+
+/* Alternativen-Zeilen im "GPU ausgebucht"-Modal */
+.gpu-alt-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.gpu-alt-row.gpu-alt-best {
+  border-color: var(--success-glow);
+  background: rgba(16, 185, 129, 0.06);
+}
+.gpu-alt-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gpu-alt-name {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+.gpu-alt-meta {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+/* GPU comparison: native dialog keeps focus and Escape behavior accessible. */
+.gpu-picker-launch {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 13px; text-align: left; border: 1px solid rgba(129, 140, 248, .4);
+  border-radius: 9px; background: rgba(99, 102, 241, .1); color: var(--text-main);
+  cursor: pointer; font: inherit;
+}
+.gpu-picker-launch:hover { background: rgba(99, 102, 241, .2); border-color: #818cf8; }
+.gpu-picker-launch small { display: block; color: #a5b4fc; font-size: .7rem; margin-top: 3px; }
+.gpu-picker-launch > span:last-child { font-size: 1.3rem; color: #a5b4fc; }
+.gpu-picker-dialog {
+  margin: auto; width: min(1320px, calc(100vw - 40px)); max-width: none;
+  max-height: calc(100dvh - 40px); padding: 0; color: var(--text-main);
+  background: #101724; border: 1px solid #334155; border-radius: 18px;
+  box-shadow: 0 32px 100px rgba(0, 0, 0, .65); color-scheme: dark;
+}
+.gpu-picker-dialog[open] { display: flex; flex-direction: column; }
+.gpu-picker-dialog::backdrop { background: rgba(3, 7, 18, .78); backdrop-filter: blur(5px); }
+.gpu-picker-header { display: flex; justify-content: space-between; gap: 20px; padding: 25px 28px 18px; flex-shrink: 0; }
+.gpu-picker-eyebrow { color: #a5b4fc; font-size: .65rem; font-weight: 700; letter-spacing: .14em; }
+.gpu-picker-header h2 { font-size: 1.7rem; letter-spacing: -.03em; margin: 5px 0; }
+.gpu-picker-header p { color: var(--text-muted); font-size: .8rem; }
+.gpu-picker-header .close-btn { align-self: flex-start; }
+.gpu-picker-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 145px 230px auto; gap: 14px; padding: 0 28px 15px; align-items: end; flex-shrink: 0; }
+.gpu-picker-dialog label { display: flex; flex-direction: column; gap: 5px; font-size: .7rem; color: var(--text-muted); }
+.gpu-picker-dialog select, .gpu-picker-dialog input[type="search"] {
+  min-width: 0; width: 100%; height: 37px; border: 1px solid #334155; border-radius: 7px;
+  background: #151f30; color: #e2e8f0; padding: 7px 10px; font: inherit; font-size: .78rem;
+}
+.gpu-picker-dialog button { white-space: nowrap; }
+.gpu-picker-dialog button:disabled { opacity: .45; cursor: not-allowed; }
+.gpu-picker-dialog :focus-visible, .gpu-picker-launch:focus-visible { outline: 2px solid #a5b4fc; outline-offset: 3px; }
+.gpu-picker-controls .icon-btn { height: 37px; }
+.gpu-picker-filters { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; padding: 0 28px 16px; flex-shrink: 0; }
+.gpu-picker-filters select { height: 32px; font-size: .72rem; }
+.gpu-picker-filters .gpu-stock-filter { flex-direction: row; align-items: center; gap: 7px; min-height: 32px; }
+.gpu-stock-filter input { accent-color: #818cf8; }
+.gpu-result-count { margin-left: auto; line-height: 32px; font-size: .7rem; color: var(--text-muted); }
+.gpu-benchmark-note { background: rgba(99, 102, 241, .07); border-block: 1px solid rgba(129, 140, 248, .14); padding: 10px 28px; font-size: .73rem; color: #aebbd0; flex-shrink: 0; }
+.gpu-benchmark-note strong { color: #c7d2fe; }
+.gpu-benchmark-note a { display: inline-block; color: #a5b4fc; margin-left: 5px; text-underline-offset: 3px; }
+.gpu-picker-message { font-size: .69rem; color: var(--text-muted); padding: 10px 28px; flex-shrink: 0; }
+.gpu-picker-message.is-error { color: #fda4af; background: rgba(239, 68, 68, .08); }
+.gpu-table-wrap { overflow: auto; min-height: 110px; flex: 1 1 auto; scrollbar-color: #475569 #101724; }
+.gpu-comparison-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: .78rem; text-align: left; }
+.gpu-comparison-table th { position: sticky; top: 0; z-index: 1; background: #1b2536; font-weight: 600; color: #b9c7dc; font-size: .69rem; padding: 11px 14px; border-block: 1px solid #334155; white-space: nowrap; }
+.gpu-comparison-table td { padding: 12px 14px; border-bottom: 1px solid rgba(148, 163, 184, .1); vertical-align: middle; }
+.gpu-comparison-table th:first-child, .gpu-comparison-table td:first-child { padding-left: 28px; }
+.gpu-comparison-table th:last-child, .gpu-comparison-table td:last-child { padding-right: 28px; }
+.gpu-comparison-table small { display: block; font-size: .64rem; color: var(--text-muted); font-weight: 400; margin-top: 4px; }
+.gpu-name-cell { min-width: 205px; max-width: 280px; }
+.gpu-name-cell strong { font-weight: 600; }
+.gpu-comparison-table .gpu-saved-tag { color: #a5b4fc; }
+.gpu-comparison-table .gpu-vram-warning { color: #fbbf24; max-width: 240px; }
+.gpu-row.stock-available { background: rgba(16, 185, 129, .04); }
+.gpu-row.stock-limited { background: rgba(245, 158, 11, .05); }
+.gpu-row.stock-unavailable { background: rgba(239, 68, 68, .035); }
+.gpu-row:hover { background: rgba(148, 163, 184, .075); }
+.gpu-row.is-selected { background: rgba(99, 102, 241, .16); }
+.gpu-row.is-selected td:first-child { box-shadow: inset 3px 0 #818cf8; }
+.gpu-number { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gpu-number strong { font-size: .85rem; font-weight: 650; }
+.gpu-fast { color: #a5b4fc; }
+.gpu-stock-badge { display: inline-block; border-radius: 5px; padding: 5px 8px; max-width: 165px; font-size: .67rem; font-weight: 600; }
+.gpu-stock-badge.available { color: #6ee7b7; background: rgba(16, 185, 129, .11); }
+.gpu-stock-badge.limited { color: #fcd34d; background: rgba(245, 158, 11, .12); }
+.gpu-stock-badge.unavailable { color: #fda4af; background: rgba(239, 68, 68, .1); }
+.gpu-stock-badge.unknown { color: #cbd5e1; background: rgba(148, 163, 184, .1); }
+.gpu-choice-cell, .gpu-choice-heading { text-align: center; }
+.gpu-choice {
+  appearance: none; display: inline-grid; place-content: center; width: 23px; height: 23px;
+  border: 1px solid #64748b; border-radius: 6px; cursor: pointer; background: #101724;
+  vertical-align: middle;
+}
+.gpu-choice:checked { background: #6366f1; border-color: #a5b4fc; }
+.gpu-choice:checked::after { content: "✓"; font: bold 16px sans-serif; color: white; }
+.gpu-choice:disabled { opacity: .25; cursor: not-allowed; }
+.gpu-empty { text-align: center; color: var(--text-muted); height: 135px; }
+.gpu-picker-footnotes { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; padding: 11px 28px 8px; color: var(--text-muted); font-size: .65rem; flex-shrink: 0; }
+.gpu-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin: 0 4px 1px 10px; background: #94a3b8; }
+.gpu-dot:first-child { margin-left: 0; }
+.gpu-dot.available { background: #34d399; }.gpu-dot.limited { background: #fbbf24; }.gpu-dot.unavailable { background: #fb7185; }
+.gpu-methodology { padding: 0 28px 12px; color: var(--text-muted); font-size: .69rem; flex-shrink: 0; }
+.gpu-methodology summary { cursor: pointer; width: fit-content; }
+.gpu-methodology p { margin-top: 7px; max-width: 1100px; }
+.gpu-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 17px 28px; background: #151f30; border-top: 1px solid #334155; flex-shrink: 0; }
+.gpu-picker-footer strong { font-size: .85rem; }
+.gpu-picker-footer p { font-size: .7rem; color: var(--text-muted); margin-top: 4px; max-width: 720px; }
+.gpu-picker-footer-actions { display: flex; gap: 10px; align-items: center; }
+.gpu-picker-footer-actions .btn-action { padding: 11px 16px; }
+@media (max-width: 800px) {
+  .gpu-picker-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); border-radius: 12px; }
+  .gpu-picker-header, .gpu-picker-controls, .gpu-picker-filters, .gpu-picker-footer { padding-inline: 16px; }
+  .gpu-picker-header { padding-top: 16px; }
+  .gpu-picker-header h2 { font-size: 1.35rem; }
+  .gpu-picker-controls { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .gpu-picker-filters { gap: 8px; }
+  .gpu-picker-filters label { flex: 1 1 auto; }
+  .gpu-benchmark-note, .gpu-picker-message, .gpu-picker-footnotes, .gpu-methodology { padding-inline: 16px; }
+  .gpu-comparison-table { min-width: 900px; }
+  .gpu-picker-footer { align-items: stretch; flex-direction: column; gap: 12px; }
+  .gpu-picker-footer-actions { justify-content: flex-end; }
+}
+@media (max-height: 740px) {
+  .gpu-picker-dialog[open] { display: block; overflow-y: auto; }
+  .gpu-table-wrap { max-height: 40vh; min-height: 150px; }
 }

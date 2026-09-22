@@ -9,6 +9,7 @@
 import sys
 import json
 import pathlib
+import tempfile
 import time
 
 import pytest
@@ -16,6 +17,16 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+# Schutz gilt bereits vor Test-Imports und auch nach monkeypatch.undo(). Die
+# ursprünglichen Produktivpfade werden in diesem pytest-Prozess nie restauriert:
+# selbst ein entkommener Daemon darf nur in temporäre Testdaten schreiben.
+_isolated_test_state = tempfile.TemporaryDirectory(prefix="runpod-videogen-pytest-")
+import backend.config_manager as _isolated_config_manager
+
+_isolated_config_manager._CONFIG_PATH = str(pathlib.Path(_isolated_test_state.name) / "config.json")
+_isolated_config_manager._OUTPUTS_DIR = str(pathlib.Path(_isolated_test_state.name) / "outputs")
 
 
 @pytest.fixture(scope="session")
@@ -36,6 +47,8 @@ def api_env(tmp_path_factory):
 
     # Background-Loop im Testbetrag deterministisch ruhig halten.
     server.orchestrator._stop_bg_thread = True
+    server.orchestrator.bg_thread.join(timeout=3)
+    assert not server.orchestrator.bg_thread.is_alive()
     return {"cfg_file": cfg_file, "outputs": outputs, "server": server}
 
 
@@ -52,6 +65,7 @@ def client(api_env):
     srv.orchestrator.pod_ip = None
     srv.orchestrator.pod_ssh_port = None
     srv.orchestrator.session_start_time = None
+    srv.orchestrator.gpu_out_of_stock = {}
 
     with TestClient(srv.app) as c:
         yield c
@@ -61,6 +75,7 @@ def client(api_env):
     srv.orchestrator.pod_ip = None
     srv.orchestrator.pod_ssh_port = None
     srv.orchestrator.session_start_time = None
+    srv.orchestrator.gpu_out_of_stock = {}
 
 
 def wait_for(cond, timeout=12.0, interval=0.05):
@@ -77,7 +92,21 @@ def wait_for(cond, timeout=12.0, interval=0.05):
 def orch_env(tmp_path, monkeypatch):
     """Eigene Temp-Config + Temp-outputs für Orchestrator-Instanz-Tests."""
     import backend.config_manager as cm
+    import backend.orchestrator as orch
+    import threading
     import types
+
+    threads = []
+
+    def tracked_thread(*args, **kwargs):
+        thread = threading.Thread(*args, **kwargs)
+        owner = getattr(kwargs.get("target"), "__self__", None)
+        threads.append((thread, owner))
+        return thread
+
+    # Nur das Modul des Orchestrators ersetzen, nicht threading.Thread global.
+    monkeypatch.setattr(orch, "threading", types.SimpleNamespace(
+        Lock=threading.Lock, Thread=tracked_thread))
 
     cfg_file = tmp_path / "config.json"
     outputs = tmp_path / "outputs"
@@ -105,4 +134,14 @@ def orch_env(tmp_path, monkeypatch):
     write_cfg()
     monkeypatch.setattr(cm, "_CONFIG_PATH", str(cfg_file))
     monkeypatch.setattr(cm, "_OUTPUTS_DIR", str(outputs))
-    return types.SimpleNamespace(write_cfg=write_cfg, cfg_file=cfg_file, outputs=outputs)
+    try:
+        yield types.SimpleNamespace(write_cfg=write_cfg, cfg_file=cfg_file, outputs=outputs)
+    finally:
+        # Vor Rücksetzen der Config-Pfade müssen auch Reconcile-Threads fertig
+        # sein; ein Stop-Flag allein verhindert ihren letzten Loop-Takt nicht.
+        for _, owner in threads:
+            if owner is not None:
+                owner._stop_bg_thread = True
+        for thread, _ in threads:
+            thread.join(timeout=3)
+            assert not thread.is_alive(), "Orchestrator-Thread läuft über die Testgrenze hinaus"

@@ -1,9 +1,76 @@
 import requests
+import math
 from typing import Dict, Any, Optional, List
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 RUNPOD_GRAPHQL_BASE = "https://api.runpod.io/graphql"
+
+
+def gpu_offer_details(gpu: Dict[str, Any], cloud_type: str) -> Dict[str, Any]:
+    """Normalize RunPod's stock separately from its catalog prices.
+
+    See https://docs.runpod.io/sdks/graphql/manage-pods (Check GPU availability).
+    A catalog price, or a null lowestPrice, does not prove current availability.
+    """
+    clouds = ("SECURE", "COMMUNITY") if cloud_type == "ALL" else (cloud_type,)
+    stock_map = {"high": "available", "medium": "available", "low": "limited",
+                 "none": "unavailable", "out": "unavailable"}
+
+    def positive_price(value):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value) if math.isfinite(value) and value > 0 else None
+        return None
+
+    offers = []
+    for cloud in clouds:
+        prefix = "secure" if cloud == "SECURE" else "community"
+        stock = gpu.get(prefix + "Stock") or {}
+        offered = gpu.get(prefix + "Cloud") is not False
+        availability = stock_map.get(str(stock.get("stockStatus") or "").lower(), "unknown")
+        source = "runpod_live" if availability != "unknown" else "unknown"
+        if not offered:
+            availability, source = "unavailable", "runpod_cloud_catalog"
+        live_price = positive_price(stock.get("uninterruptablePrice")) if offered else None
+        catalog_price = positive_price(gpu.get(prefix + "Price")) if offered else None
+        offers.append({
+            "cloud_type": cloud,
+            "availability": availability,
+            "availability_source": source,
+            "hourly_price": live_price if live_price is not None else catalog_price,
+            "price_source": "runpod_live" if live_price is not None else
+                            "runpod_catalog" if catalog_price is not None else "unknown",
+        })
+
+    # An ALL request can deploy in either cloud. An unknown cloud must not turn
+    # an explicit no-stock result in the other cloud into "unavailable".
+    states = {offer["availability"] for offer in offers}
+    availability = next(state for state in ("available", "limited", "unknown", "unavailable")
+                        if state in states)
+    candidates = [offer for offer in offers if offer["availability"] in ("available", "limited")]
+    if not candidates:
+        candidates = [offer for offer in offers if offer["availability"] == "unknown"] or offers
+    priced = [offer for offer in candidates if offer["hourly_price"] is not None]
+    selected = min(priced, key=lambda offer: offer["hourly_price"]) if priced else None
+    source = next(offer["availability_source"] for offer in offers
+                  if offer["availability"] == availability)
+    labels = {"available": "Verfügbar", "limited": "Wenige verfügbar",
+              "unavailable": "Nicht verfügbar", "unknown": "Verfügbarkeit unbekannt"}
+    label = labels[availability]
+    if all(offer["availability_source"] == "runpod_cloud_catalog" for offer in offers):
+        label = "In dieser Cloud nicht angeboten"
+
+    return {
+        "availability": availability,
+        "availability_label": label,
+        "availability_source": source,
+        "available": True if availability in ("available", "limited") else
+                     False if availability == "unavailable" else None,
+        "hourly_price": selected["hourly_price"] if selected else None,
+        "price_source": selected["price_source"] if selected else "unknown",
+        "price_cloud_type": selected["cloud_type"] if selected else None,
+        "cloud_type": cloud_type,
+    }
 
 _session = requests.Session()
 _retry_strategy = Retry(
@@ -76,6 +143,8 @@ class RunPodClient:
         return data.get("myself", {})
 
     def get_gpu_types(self) -> List[Dict[str, Any]]:
+        # Query both clouds explicitly: secureCloud=false is Community, while
+        # omitting this filter is not a reliable substitute for an ALL merge.
         query = """
         query {
           gpuTypes {
@@ -84,6 +153,38 @@ class RunPodClient:
             memoryInGb
             securePrice
             communityPrice
+            secureCloud
+            communityCloud
+            secureStock: lowestPrice(input: {gpuCount: 1, secureCloud: true}) {
+              stockStatus
+              uninterruptablePrice
+            }
+            communityStock: lowestPrice(input: {gpuCount: 1, secureCloud: false}) {
+              stockStatus
+              uninterruptablePrice
+            }
+          }
+        }
+        """
+        try:
+            data = self._request(query)
+            return data.get("gpuTypes", [])
+        except Exception:
+            # Keep the catalog usable if the stock resolver is temporarily
+            # unavailable. Missing stock fields normalize to "unknown".
+            return self._get_gpu_catalog()
+
+    def _get_gpu_catalog(self) -> List[Dict[str, Any]]:
+        query = """
+        query {
+          gpuTypes {
+            id
+            displayName
+            memoryInGb
+            securePrice
+            communityPrice
+            secureCloud
+            communityCloud
           }
         }
         """
@@ -91,6 +192,7 @@ class RunPodClient:
         return data.get("gpuTypes", [])
 
     def get_pod(self, pod_id: str) -> Optional[Dict[str, Any]]:
+        """Return None only for a confirmed null pod, never for a failed query."""
         query = """
         query($podId: String!) {
           pod(input: {podId: $podId}) {
@@ -120,10 +222,19 @@ class RunPodClient:
         """
         try:
             data = self._request(query, {"podId": pod_id})
-            return data.get("pod")
         except Exception as e:
-            print(f"[RunPodClient] Error getting pod {pod_id}: {e}")
-            return None
+            # HTTP errors may include the authenticated URL. Keep the failure
+            # distinct from a missing pod without leaking that URL to callers.
+            raise RuntimeError(
+                f"RunPod-Podstatusabfrage fehlgeschlagen ({type(e).__name__}). "
+                "API-Verbindung und Berechtigung prüfen."
+            ) from None
+        if not isinstance(data, dict) or "pod" not in data:
+            raise RuntimeError("RunPod-Podstatusabfrage lieferte keine gültige Pod-Antwort.")
+        pod = data["pod"]
+        if pod is not None and (not isinstance(pod, dict) or pod.get("id") != pod_id):
+            raise RuntimeError("RunPod-Podstatusabfrage lieferte keine passende Pod-Antwort.")
+        return pod
 
     def deploy_pod(
         self,

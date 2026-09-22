@@ -4,6 +4,7 @@
 # doppelt gebuchten Pods führt.
 
 import pytest
+import traceback
 
 import backend.runpod_client as rpc
 
@@ -90,12 +91,45 @@ def test_queries_use_retry_session(sessions):
     assert len(no_retry.posts) == 0
 
 
-def test_get_pod_swallows_errors_and_returns_none(sessions):
+def test_get_pod_raises_on_graphql_error_instead_of_claiming_not_found(sessions):
     retry, _ = sessions
     retry.response = FakeResponse(errors=[{"message": "not found"}])
     client = rpc.RunPodClient("rpa_testkey")
 
-    assert client.get_pod("p1") is None
+    with pytest.raises(RuntimeError, match="Podstatusabfrage fehlgeschlagen"):
+        client.get_pod("p1")
+
+
+def test_get_pod_returns_none_for_explicit_null_only(sessions):
+    retry, _ = sessions
+    retry.response = FakeResponse(data={"pod": None})
+
+    assert rpc.RunPodClient("rpa_testkey").get_pod("p1") is None
+
+
+def test_get_pod_transport_failure_does_not_expose_api_key(sessions, monkeypatch, capsys):
+    retry, _ = sessions
+    key = "rpa_PRIVATE_TEST_VALUE"
+
+    def fail(*_args, **_kwargs):
+        raise rpc.requests.ConnectionError(f"Connection failed: https://api.runpod.io/graphql?api_key={key}")
+
+    monkeypatch.setattr(retry, "post", fail)
+    with pytest.raises(RuntimeError, match="ConnectionError") as caught:
+        rpc.RunPodClient(key).get_pod("p1")
+
+    assert key not in str(caught.value)
+    assert key not in "".join(traceback.format_exception(caught.value))
+    assert key not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("data", [None, {}, {"pod": "invalid"}, {"pod": {}}, {"pod": {"id": "other-pod"}}])
+def test_get_pod_malformed_response_is_not_treated_as_missing(monkeypatch, data):
+    client = rpc.RunPodClient("rpa_testkey")
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: data)
+
+    with pytest.raises(RuntimeError, match="Pod-Antwort"):
+        client.get_pod("p1")
 
 
 def test_deploy_pod_payload_structure(sessions):
@@ -134,3 +168,96 @@ def test_deploy_pod_without_id_raises(sessions):
 
 def test_proxy_url_format():
     assert rpc.RunPodClient.get_proxy_url("abc123", 7860) == "https://abc123-7860.proxy.runpod.net"
+
+
+def test_gpu_catalog_queries_both_clouds_for_live_stock(sessions):
+    retry, no_retry = sessions
+    retry.response = FakeResponse(data={"gpuTypes": [{"id": "NVIDIA A40"}]})
+
+    assert rpc.RunPodClient("testkey").get_gpu_types() == [{"id": "NVIDIA A40"}]
+    query = retry.posts[0]["json"]["query"]
+    assert "secureStock: lowestPrice(input: {gpuCount: 1, secureCloud: true})" in query
+    assert "communityStock: lowestPrice(input: {gpuCount: 1, secureCloud: false})" in query
+    assert "stockStatus" in query
+    assert not no_retry.posts
+
+
+def test_gpu_catalog_falls_back_without_inventing_stock(monkeypatch):
+    client = rpc.RunPodClient("testkey")
+    queries = []
+
+    def request(query):
+        queries.append(query)
+        if "lowestPrice" in query:
+            raise RuntimeError("stock resolver unavailable")
+        return {"gpuTypes": [{"id": "NVIDIA A40", "communityPrice": 0.35}]}
+
+    monkeypatch.setattr(client, "_request", request)
+    gpu = client.get_gpu_types()[0]
+    offer = rpc.gpu_offer_details(gpu, "COMMUNITY")
+
+    assert len(queries) == 2
+    assert offer["availability"] == "unknown"
+    assert offer["available"] is None
+    assert offer["hourly_price"] == 0.35
+    assert offer["price_source"] == "runpod_catalog"
+
+
+@pytest.mark.parametrize("stock,expected,available", [
+    ("High", "available", True), ("Medium", "available", True),
+    ("Low", "limited", True), ("None", "unavailable", False),
+    ("Out", "unavailable", False), (None, "unknown", None),
+    ("unexpected", "unknown", None),
+])
+def test_stock_mapping_does_not_guess_unknown_values(stock, expected, available):
+    offer = rpc.gpu_offer_details({
+        "communityPrice": 0.35, "communityStock": {"stockStatus": stock},
+    }, "COMMUNITY")
+    assert offer["availability"] == expected
+    assert offer["available"] is available
+
+
+def test_cloud_not_offered_ignores_misleading_catalog_price():
+    offer = rpc.gpu_offer_details({
+        "communityCloud": False, "communityPrice": 0.35,
+        "secureCloud": True, "securePrice": 0.49,
+    }, "COMMUNITY")
+    assert offer["availability"] == "unavailable"
+    assert offer["availability_source"] == "runpod_cloud_catalog"
+    assert offer["hourly_price"] is None
+
+
+def test_secure_price_does_not_fall_back_to_cheaper_community():
+    offer = rpc.gpu_offer_details({
+        "communityPrice": 0.35, "securePrice": 0.49,
+        "secureStock": {"stockStatus": "Low", "uninterruptablePrice": 0.55},
+    }, "SECURE")
+    assert offer["hourly_price"] == 0.55
+    assert offer["price_cloud_type"] == "SECURE"
+    assert offer["price_source"] == "runpod_live"
+
+
+def test_all_clouds_prefers_available_offer_over_lower_out_of_stock_price():
+    offer = rpc.gpu_offer_details({
+        "communityPrice": 0.35, "securePrice": 0.49,
+        "communityStock": {"stockStatus": "None", "uninterruptablePrice": 0.35},
+        "secureStock": {"stockStatus": "Low", "uninterruptablePrice": 0.49},
+    }, "ALL")
+    assert offer["availability"] == "limited"
+    assert offer["hourly_price"] == 0.49
+    assert offer["price_cloud_type"] == "SECURE"
+
+
+def test_all_clouds_reports_unknown_when_only_one_cloud_has_no_stock():
+    offer = rpc.gpu_offer_details({
+        "communityPrice": 0.35, "securePrice": 0.49,
+        "communityStock": {"stockStatus": "None"},
+    }, "ALL")
+    assert offer["availability"] == "unknown"
+
+
+@pytest.mark.parametrize("price", [0, -1, None, float("nan"), float("inf"), "0.35", True])
+def test_invalid_prices_are_not_usable(price):
+    offer = rpc.gpu_offer_details({"communityPrice": price}, "COMMUNITY")
+    assert offer["hourly_price"] is None
+    assert offer["price_source"] == "unknown"

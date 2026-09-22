@@ -1,5 +1,6 @@
 import os
 import io
+import codecs
 import json
 import time
 import re
@@ -12,6 +13,7 @@ _SSH_PRIV_FILE = os.path.join(_SSH_KEY_DIR, "id_rsa")
 _SSH_PUB_FILE = os.path.join(_SSH_KEY_DIR, "id_rsa.pub")
 
 NAME_MAP_FILENAME = ".name_map.json"
+_STREAM_TAIL_CHARS = 200_000
 
 
 def _name_map_path() -> str:
@@ -81,16 +83,20 @@ class SSHManager:
     def get_client(self, timeout: int = 15) -> paramiko.SSHClient:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        pkey = paramiko.RSAKey.from_private_key(io.StringIO(self.priv_key_str))
-        client.connect(
-            hostname=self.host,
-            port=self.port,
-            username="root",
-            pkey=pkey,
-            timeout=timeout,
-            banner_timeout=15,
-            auth_timeout=15
-        )
+        try:
+            pkey = paramiko.RSAKey.from_private_key(io.StringIO(self.priv_key_str))
+            client.connect(
+                hostname=self.host,
+                port=self.port,
+                username="root",
+                pkey=pkey,
+                timeout=timeout,
+                banner_timeout=min(15, timeout),
+                auth_timeout=min(15, timeout),
+            )
+        except Exception:
+            client.close()
+            raise
         return client
 
     def exec_command(self, cmd: str, timeout: int = 60) -> Tuple[int, str, str]:
@@ -104,6 +110,98 @@ class SSHManager:
             return exit_code, out_str, err_str
         finally:
             client.close()
+
+    def exec_command_stream(
+        self,
+        cmd: str,
+        timeout: float = 60,
+        on_line: Optional[Callable[[str], None]] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[int, str, str]:
+        """Run a command while draining both streams and reporting complete lines.
+
+        CR, LF and CRLF delimit progress lines; split UTF-8 characters are decoded
+        incrementally. The returned stdout/stderr and any unfinished single line
+        retain at most 200,000 characters each. A trailing line without a newline
+        is reported on successful completion as well.
+
+        ``timeout`` sets an absolute deadline, not an inactivity timeout. Expiry
+        raises TimeoutError; a true ``cancelled()`` raises InterruptedError.
+        Callback failures propagate. In every case the SSH client is closed.
+        Closing this channel is not a guarantee that a remote process is killed.
+        """
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        deadline = time.monotonic() + timeout
+        client = None
+        streams = {
+            name: {
+                "decoder": codecs.getincrementaldecoder("utf-8")(errors="replace"),
+                "tail": "", "line": "", "last_cr": False,
+            }
+            for name in ("stdout", "stderr")
+        }
+
+        def check_running():
+            if cancelled is not None and cancelled():
+                raise InterruptedError("SSH command cancelled")
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"SSH command exceeded {timeout:g} seconds")
+
+        def consume(name, data, final=False):
+            stream = streams[name]
+            text = stream["decoder"].decode(data, final=final)
+            stream["tail"] = (stream["tail"] + text)[-_STREAM_TAIL_CHARS:]
+            if text:
+                # A CRLF pair may be split across network packets.
+                if stream["last_cr"] and text.startswith("\n"):
+                    text = text[1:]
+                stream["last_cr"] = text.endswith("\r")
+                start = 0
+                for match in re.finditer(r"\r\n|\r|\n", text):
+                    line = (stream["line"] + text[start:match.start()])[-_STREAM_TAIL_CHARS:]
+                    if on_line is not None:
+                        on_line(line)
+                    stream["line"] = ""
+                    start = match.end()
+                stream["line"] = (stream["line"] + text[start:])[-_STREAM_TAIL_CHARS:]
+            if final and stream["line"]:
+                if on_line is not None:
+                    on_line(stream["line"])
+                stream["line"] = ""
+
+        try:
+            check_running()
+            client = self.get_client(timeout=min(15, timeout))
+            check_running()
+            _, stdout, _ = client.exec_command(cmd, timeout=deadline - time.monotonic())
+            channel = stdout.channel
+            while True:
+                check_running()
+                received = False
+                # Alternate streams so a busy stdout cannot starve stderr (or
+                # cancellation). Never wait for exit before draining the window.
+                if channel.recv_ready():
+                    consume("stdout", channel.recv(32_768))
+                    received = True
+                check_running()
+                if channel.recv_stderr_ready():
+                    consume("stderr", channel.recv_stderr(32_768))
+                    received = True
+                check_running()
+                if (channel.exit_status_ready()
+                        and not channel.recv_ready()
+                        and not channel.recv_stderr_ready()):
+                    consume("stdout", b"", final=True)
+                    check_running()
+                    consume("stderr", b"", final=True)
+                    check_running()
+                    return channel.recv_exit_status(), streams["stdout"]["tail"], streams["stderr"]["tail"]
+                if not received:
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        finally:
+            if client is not None:
+                client.close()
 
     def sync_videos(self, remote_dir: str = "/workspace/Wan2GP/outputs") -> List[str]:
         """

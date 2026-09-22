@@ -3,15 +3,16 @@ import sys
 import asyncio
 import subprocess
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Dict, Any, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from backend.config_manager import load_config, update_config, get_outputs_dir, DEFAULT_CONFIG
-from backend.runpod_client import RunPodClient
+from backend.runpod_client import RunPodClient, gpu_offer_details
 from backend.orchestrator import PodOrchestrator
 
 _main_loop: asyncio.AbstractEventLoop | None = None
@@ -24,6 +25,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RunPod VideoGen Studio", version="1.0.0", lifespan=lifespan)
 orchestrator = PodOrchestrator()
+
+# Lokale App: HTML/JS/CSS immer neu validieren lassen (ETag/304 bleibt gültig),
+# damit nach einem Update nicht eine alte, defekte Version aus dem Browser-Cache läuft.
+@app.middleware("http")
+async def no_cache_for_ui(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 # Mount outputs directory for direct streaming if needed
 outputs_dir = get_outputs_dir()
@@ -102,27 +112,66 @@ def get_status():
     }
 
 @app.get("/api/gpus")
-def get_gpus():
+def get_gpus(cloud_type: str | None = None):
+    cfg = load_config()
+    selected_cloud = (cloud_type or cfg.get("cloud_type", "ALL")).upper()
+    if selected_cloud not in {"ALL", "SECURE", "COMMUNITY"}:
+        raise HTTPException(status_code=400, detail="Ungültiger Cloud-Typ.")
     client = orchestrator.get_client()
     try:
         all_gpus = client.get_gpu_types()
-        # Filter down to GPUs relevant for 20B / Video models (>= 24GB VRAM)
+        # This bootstrap uses NVIDIA CUDA and requires at least 24 GB VRAM.
+        unavailable = orchestrator.get_gpu_availability()
         filtered = []
         for g in all_gpus:
-            vram = g.get("memoryInGb", 0)
-            if vram >= 24:
+            vram = g.get("memoryInGb") or 0
+            if vram >= 24 and g.get("id", "").startswith("NVIDIA "):
+                offer = gpu_offer_details(g, selected_cloud)
+                # A past failed booking is a fallback only. Fresh live stock
+                # wins; a failure in another cloud says nothing about this one.
+                if (offer["availability"] == "unknown" and g["id"] in unavailable
+                        and selected_cloud == cfg.get("cloud_type", "ALL").upper()):
+                    offer.update({
+                        "availability": "unavailable",
+                        "availability_label": "Letzter Buchungsversuch: ausgebucht",
+                        "availability_source": "recent_booking_failure",
+                        "available": False,
+                    })
                 filtered.append({
                     "id": g["id"],
                     "displayName": g["displayName"],
                     "vram": vram,
                     "communityPrice": g.get("communityPrice"),
-                    "securePrice": g.get("securePrice")
+                    "securePrice": g.get("securePrice"),
+                    **offer,
                 })
-        # Sort by price
-        filtered.sort(key=lambda x: (x.get("communityPrice") or 99))
-        return {"gpus": filtered}
+        availability_order = {"available": 0, "limited": 1, "unknown": 2, "unavailable": 3}
+        filtered.sort(key=lambda x: (availability_order[x["availability"]],
+                                    x["hourly_price"] if x["hourly_price"] is not None else float("inf")))
+        return {
+            "gpus": filtered,
+            "cloud_type": selected_cloud,
+            "selected_gpu_id": cfg.get("gpu_type_id"),
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "availability_notice": "RunPod-Momentaufnahme für 1 GPU; Verfügbarkeit und Preis können "
+                                   "sich bis zur Buchung ändern. Speicher- und Standortanforderungen "
+                                   "können die Auswahl weiter einschränken. Katalogpreise sind keine "
+                                   "Buchungszusage; Datenträgerkosten kommen hinzu.",
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # requests exceptions can include the authenticated URL. Never pass
+        # that URL (and therefore the API key) through to the browser.
+        message = str(e)
+        api_key = getattr(client, "api_key", "")
+        if api_key:
+            message = message.replace(api_key, "[redacted]")
+        raise HTTPException(status_code=500, detail=message)
+
+@app.post("/api/gpus/availability/reset")
+def reset_gpu_availability():
+    """Setzt die per fehlgeschlagener Buchung gelernten 'ausgebucht'-Markierungen zurück."""
+    orchestrator.reset_gpu_availability()
+    return {"success": True}
 
 @app.post("/api/pod/start")
 def start_pod():
@@ -235,7 +284,12 @@ def get_config_endpoint():
 @app.post("/api/config")
 def update_config_endpoint(model: ConfigUpdateModel):
     updates = {k: v for k, v in model.model_dump().items() if v is not None}
+    previous_cloud = load_config().get("cloud_type", "ALL").upper()
     updated = update_config(updates)
+    if "cloud_type" in updates and updated["cloud_type"].upper() != previous_cloud:
+        # Learned booking failures belong to the old cloud selection. A plain
+        # settings save or a GPU list refresh must leave those marks intact.
+        orchestrator.reset_gpu_availability()
     orchestrator.log(f"Einstellungen aktualisiert: {list(updates.keys())}")
     return {"success": True, "config": updated}
 
