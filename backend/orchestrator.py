@@ -1061,7 +1061,44 @@ class PodOrchestrator:
             echo "[BOOTSTRAP] Torch zu alt fuer Wan2GP-Abhaengigkeiten - upgrade auf 2.6.0 (cu124)..."
             python3 -m pip install --no-cache-dir "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0"
         fi
-        python3 -c "import torch, triton; print('[BOOTSTRAP] torch', torch.__version__, '| triton', triton.__version__, '| CUDA:', torch.cuda.is_available())"
+
+        # CUDA-Kompatibilitaet: Wan2GP-requirements kann ein torch mit
+        # CUDA-13-Runtime nachziehen. Ein Host mit 12.x-Treiber (z. B. 12080)
+        # startet dieses torch ohne GPU ("driver too old") und wgp.py stuerzt
+        # beim Import ab. Torchs CUDA-Version muss daher kleiner-gleich der
+        # Treiber-Version sein - sonst einmalig auf die cu124-Generation heben,
+        # die auf jedem 12.x-Treiber laeuft (minor-version compatibility).
+        # Exit 0 = kompatibel (then-Zweig), Exit 1 = inkompatibel (else-Zweig).
+        if python3 - <<'VIDEOGEN_TORCH_CUDA'
+import torch, re, subprocess
+torch_cuda = tuple(int(x) for x in (torch.version.cuda or "0").split(".")[:2])
+try:
+    out = subprocess.check_output(["nvidia-smi"], text=True)
+    driver = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", out)
+    driver_cuda = (int(driver.group(1)), int(driver.group(2))) if driver else (0, 0)
+except Exception:
+    driver_cuda = (0, 0)
+ok = torch_cuda <= driver_cuda if driver_cuda != (0, 0) else torch.cuda.is_available()
+raise SystemExit(0 if ok else 1)
+VIDEOGEN_TORCH_CUDA
+        then
+            echo "[BOOTSTRAP] torch-CUDA laeuft auf diesem Treiber."
+        else
+            echo "[BOOTSTRAP] torch-CUDA passt nicht zum Host-Treiber (zu neu) - reinstall mit cu124..."
+            python3 -m pip install --no-cache-dir "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0" --index-url https://download.pytorch.org/whl/cu124
+            # Die vorherige (neuere) Torch-Generation hinterlaesst ihre
+            # Bibliothekspakete SUFFIX-LOS (nvidia-*-cu13-Generation). Torch
+            # laedt dann Mischversionen -> cuDNN-Initialisierung stirbt mit
+            # CUDNN_STATUS_NOT_INITIALIZED beim ersten conv3d. Weg damit -
+            # die cu12-Pakete des neuen Torch bleiben allein uebrig.
+            echo "[BOOTSTRAP] Raeume Altlasten der falschen CUDA-Generation ab..."
+            python3 -m pip uninstall -y nvidia-cudnn-cu13 nvidia-nccl-cu13 nvidia-cusparselt-cu13 nvidia-cuda-cupti nvidia-cuda-nvrtc nvidia-cuda-runtime nvidia-cufft nvidia-cufile nvidia-curand nvidia-cusolver nvidia-cusparse nvidia-nvjitlink >/dev/null 2>&1 || true
+            # Die Deinstallation kann geteilte Dateien in nvidia/cudnn/lib
+            # mitgerissen haben (beide Generationen nutzen denselben Pfad) -
+            # die korrekte cu12-cuDNN darum verlaesslich neu auspacken.
+            python3 -m pip install --no-cache-dir --force-reinstall --no-deps nvidia-cudnn-cu12==9.1.0.70
+        fi
+        python3 -c "import torch, triton; print('[BOOTSTRAP] torch', torch.__version__, '| cuda', torch.version.cuda, '| triton', triton.__version__, '| CUDA:', torch.cuda.is_available())"
 
         echo "[VIDEOGEN_PHASE] launch"
 

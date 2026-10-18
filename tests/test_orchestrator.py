@@ -1192,6 +1192,34 @@ def test_bootstrap_upgrades_old_torch_and_guards_triton_patch():
     assert 0 < triton_guard_pos < wrapper_pos
 
 
+def test_bootstrap_torch_cuda_check_not_inverted():
+    """Regression: Die CUDA-Treiber-Kompatibilitätsprüfung darf NICHT mit
+    `if !` negiert sein. Bei Exit 1 (torch-CUDA neuer als der Treiber) lief
+    sonst fälschlich der OK-Zweig, wgp.py stürzte mit 'driver too old' ab und
+    der cu124-Reinstall wurde nie ausgeführt (beobachtet 2026-10-18, torch
+    2.14.1+cu130 auf Treiber 12.8)."""
+    import inspect
+
+    source = inspect.getsource(PodOrchestrator._bootstrap_wan2gp)
+    check_pos = source.find("VIDEOGEN_TORCH_CUDA")
+    assert check_pos > 0, "CUDA-Check fehlt im Bootstrap"
+    assert "if ! python3 - <<'VIDEOGEN_TORCH_CUDA'" not in source, \
+        "CUDA-Check invertiert: Exit 1 (zu neuer Treiber) würde als OK gelten"
+    assert "if python3 - <<'VIDEOGEN_TORCH_CUDA'" in source
+    # Reihenfolge: OK-Meldung im then, reinstall erst im else
+    ok_pos = source.find("laeuft auf diesem Treiber")
+    reinstall_pos = source.find("passt nicht zum Host-Treiber")
+    then_pos = source.find("then", check_pos)
+    else_pos = source.find("else", then_pos)
+    assert 0 < then_pos < ok_pos < else_pos < reinstall_pos
+    # Nach dem Downgrade müssen die suffix-losen CUDA-13-Bibliothekspakete
+    # entfernt und die cu12-cuDNN neu ausgepackt werden (beobachtet
+    # 2026-10-18: Mischinstallation -> CUDNN_STATUS_NOT_INITIALIZED).
+    cleanup_pos = source.find("nvidia-cudnn-cu13")
+    cudnn_reinstall_pos = source.find("force-reinstall --no-deps nvidia-cudnn-cu12")
+    assert 0 < reinstall_pos < cleanup_pos < cudnn_reinstall_pos
+
+
 # ------------------------------------------------- GPU-Ausweichbuchung
 
 class _FallbackGpuClient:
