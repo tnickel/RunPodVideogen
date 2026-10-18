@@ -9,7 +9,21 @@ from pathlib import Path
 
 from backend.config_manager import load_config, update_config, get_outputs_dir
 from backend.runpod_client import RunPodClient
-from backend.ssh_client import SSHManager, get_or_create_ssh_keys, load_name_map, save_name_map
+from backend.ssh_client import SSHManager, get_or_create_ssh_keys, get_verified_identity, remove_name_mapping
+
+
+class PodPreflightError(Exception):
+    """Der zugewiesene Pod-Host ist vor dem Setup als unbrauchbar erkannt
+    (CUDA-Treiber, SSH oder Netzwerk-Geschwindigkeit).
+
+    Der Start-Worker terminiert so einen Pod sofort - RunPod berechnet ihn
+    sonst weiter, obwohl er nichts leisten kann - und bucht automatisch neu.
+    `component` ist "cuda", "ssh" oder "network" (nur für Logs/UI)."""
+
+    def __init__(self, component: str, message: str):
+        super().__init__(message)
+        self.component = component
+
 
 class PodOrchestrator:
     # Wie lange eine per fehlgeschlagener Buchung erkannte "ausgebucht"-Markierung gilt.
@@ -17,8 +31,17 @@ class PodOrchestrator:
     # Bestandsdaten haben Vorrang; alte Buchungsfehler verfallen automatisch.
     GPU_OUT_OF_STOCK_TTL_SECONDS = 15 * 60
 
+    # Netzwerk-Preflight: 20 MB Range-Request gegen eine bekannte, öffentliche
+    # HuggingFace-Datei. Die Modell-Downloads (30+ GB) dominieren die Setup-Zeit;
+    # ein Host mit toter/lahmer Leitung ist vorher billig zu erkennen.
+    NET_PREFLIGHT_URL = "https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors"
+    NET_PREFLIGHT_BYTES = 20 * 1024 * 1024
+
     def __init__(self):
-        self.lock = threading.Lock()
+        # Reentrant: Lifecycle-Methoden (start/stop/terminate) buchen unter
+        # gehaltenem Lock die Session-Kosten (_book_session_cost -> log());
+        # ein einfacher Lock würde dort gegenseitig blockieren.
+        self.lock = threading.RLock()
         self.log_history = deque(maxlen=300)
         self.listeners = set()
         self.gpu_out_of_stock: Dict[str, float] = {}
@@ -34,6 +57,7 @@ class PodOrchestrator:
         self.hourly_rate: Optional[float] = None
         self._hourly_rate_pod_id: Optional[str] = None
         self._operation_id = 0
+        self._sync_in_progress = False
         self.startup_progress = {
             "phase": "cancelled", "label": "Kein Start aktiv", "detail": "",
             "started_at": None, "updated_at": None, "active": False,
@@ -106,6 +130,10 @@ class PodOrchestrator:
                 "started_at": previous.get("started_at") or (now if active else None),
                 "updated_at": now, "active": active,
             }
+            # Fortschritt ist Aktivität: schützt laufende Installationen vor dem
+            # Inaktivitäts-Auto-Shutdown (auch für spätere ERROR-Zustände).
+            if active and hasattr(self, "last_activity_time"):
+                self.last_activity_time = now
 
     def _refresh_pod_rate(self, pod_id, pod_info, operation_id=None):
         """Only accept a finite rate reported for this pod and this operation."""
@@ -276,12 +304,31 @@ class PodOrchestrator:
                 update_config({"active_pod_status": "ERROR"})
             self.log(f"Status-Reconciliation fehlgeschlagen ({type(e).__name__}); vorhandener Pod bleibt gespeichert.", level="WARNING")
 
+    def _book_session_cost(self):
+        """Bucht die aufgelaufenen Session-Kosten endgültig (spent_total, persistent).
+
+        Ohne diese Verbuchung würde das Guthaben beim nächsten Session-Start die
+        ausgegebene GPU-Zeit vergessen (accumulated_cost wird dort zurückgesetzt).
+        """
+        accumulated = float(self.accumulated_cost or 0.0)
+        if accumulated <= 0:
+            return
+        cfg = load_config()
+        spent = float(cfg.get("spent_total", 0.0) or 0.0) + accumulated
+        update_config({"spent_total": round(spent, 4)})
+        self.accumulated_cost = 0.0
+        self.log(f"Session-Kosten verbucht: ${accumulated:.4f} (gesamt ausgegeben: ${spent:.2f})")
+
     def start_pod(self) -> Dict[str, Any]:
         with self.lock:
             if self.status in ["RUNNING", "STARTING", "BOOTSTRAPPING"]:
                 return {"success": False, "message": f"Pod befindet sich bereits im Status {self.status}"}
+            # Restkosten eines evtl. unsanft beendeten Sessions auch verbuchen
+            self._book_session_cost()
             self.status = "STARTING"
             self._operation_id += 1
+            self._preflight_retries = 0
+            self._fresh_pod_op_id = None
             operation_id = self._operation_id
             self.status_detail = "Initialisiere Pod..."
             self.last_activity_time = time.time()
@@ -321,6 +368,7 @@ class PodOrchestrator:
                     return {"success": True, "message": "Pause ausgeführt; neueren Zustand beibehalten"}
                 self.status = "STOPPED"
                 self.status_detail = "Pod pausiert (Speicher erhalten)"
+                self._book_session_cost()
                 self.session_start_time = None
                 self.hourly_rate = None
                 self._hourly_rate_pod_id = None
@@ -359,6 +407,7 @@ class PodOrchestrator:
                     return {"success": True, "message": "Löschen ausgeführt; neueren Zustand beibehalten"}
                 self.status = "TERMINATED"
                 self.status_detail = "Pod gelöscht (0,00 € Standby)"
+                self._book_session_cost()
                 self.pod_id = None
                 self.pod_ip = None
                 self.pod_ssh_port = None
@@ -382,6 +431,171 @@ class PodOrchestrator:
                     update_config({"active_pod_status": "ERROR"})
             self.log(f"Fehler beim Terminieren: {e}", level="ERROR")
             return {"success": False, "message": str(e)}
+
+    def _cleanup_orphan_pod(self, client, pod_id: str):
+        """Räumt einen Pod auf, den eine ersetzte/abgebrochene Operation erstellt hat.
+
+        Gelingt das nicht, wird die ID persistent in `orphan_pod_ids` vermerkt
+        und laut gemeldet, damit sie manuell bei RunPod gelöscht werden kann."""
+        try:
+            client.terminate_pod(pod_id)
+            self.log(f"Verwaisten Pod {pod_id} (Operation wurde abgelöst) terminiert.", level="WARNING")
+            return
+        except Exception as e:
+            self.log(f"ACHTUNG: Verwaister Pod {pod_id} konnte nicht terminiert werden "
+                     f"({e}). Bitte in RunPod manuell löschen - er kostet sonst weiter Geld!", level="ERROR")
+        try:
+            cfg = load_config()
+            orphans = list(cfg.get("orphan_pod_ids", []) or [])
+            if pod_id not in orphans:
+                orphans.append(pod_id)
+                update_config({"orphan_pod_ids": orphans})
+        except Exception as e:
+            self.log(f"Verwaiste Pod-ID {pod_id} konnte nicht persistiert werden: {e}", level="ERROR")
+
+    def _preflight_network_speed(self, ssh) -> Optional[float]:
+        """Misst die Download-Rate (Bytes/s) zu HuggingFace per 20-MB-Range-Request.
+
+        Rückgabe None = Messung nicht möglich (SSH-Fehler, Curl-Fehler wie
+        DNS/TLS/Timeout, unlesbare oder ungültige Ausgabe); der Host wird dann
+        NICHT verworfen, damit ein Messproblem keinen funktionierenden Pod
+        kostet. Nur eine erfolgreich durchgeführte Messung liefert einen Wert."""
+        # Curl-Exitcode und Messwert getrennt einsammeln: Wuerde der Exitcode
+        # (wie bei einem echo-Wrapper) verloren gehen, erschiene z. B. ein
+        # Timeout-Resttransfer als "erfolgreiche Messung" mit Mini-Rate.
+        command = (
+            'speed=$(curl --fail -sL -o /dev/null -w "%{speed_download}" '
+            f"--max-time 25 -r 0-{self.NET_PREFLIGHT_BYTES} {shlex.quote(self.NET_PREFLIGHT_URL)} 2>/dev/null); "
+            'rc=$?; echo "VG_NET_SPEED_RC=$rc VG_NET_SPEED=$speed"'
+        )
+        try:
+            code, out, _err = ssh.exec_command(command, timeout=35)
+        except Exception as e:
+            self.log(f"Netzwerk-Preflight nicht ausführbar ({type(e).__name__}); Prüfung übersprungen.", level="WARNING")
+            return None
+        if code != 0:
+            self.log(f"Netzwerk-Preflight mit Exit-Code {code} abgebrochen; Prüfung übersprungen.", level="WARNING")
+            return None
+        rc, raw = None, None
+        for token in out.split():
+            if token.startswith("VG_NET_SPEED_RC="):
+                try:
+                    rc = int(token.split("=", 1)[1])
+                except ValueError:
+                    rc = None
+            elif token.startswith("VG_NET_SPEED="):
+                raw = token.split("=", 1)[1].strip().strip('"').strip("'")
+        if rc is None or rc != 0:
+            return None
+        try:
+            value = float(raw) if raw else None
+        except ValueError:
+            return None
+        if value is None or not math.isfinite(value) or value < 0:
+            return None
+        return value
+
+    def _handle_preflight_failure(self, operation_id: int, err: PodPreflightError):
+        """Reaktion auf einen im Preflight erkannten defekten Host.
+
+        Frisch gebuchte Pods: sofort terminieren (RunPod berechnet ERROR-Pods
+        weiter) und automatisch neu buchen - maximal preflight_max_retries Mal.
+        Bestands-Pods (aufgeweckt aus Standby oder wiederverwendet): Volume mit
+        den Modellen und Pod-ID unangetastet lassen, nur datenerhaltend pausieren
+        und den Fehler anzeigen - ein transienter SSH-/Netzfehler darf niemals
+        den gespeicherten Pod samt Daten löschen."""
+        detail = str(err)[-500:]
+        self.log(f"Preflight fehlgeschlagen ({err.component}): {detail}", level="ERROR")
+
+        with self.lock:
+            if operation_id != self._operation_id:
+                return
+            pod_id = self.pod_id or None
+            fresh_pod = pod_id is not None and getattr(self, "_fresh_pod_op_id", None) == operation_id
+        client = self.get_client()
+
+        if pod_id and not fresh_pod:
+            stopped = False
+            try:
+                client.stop_pod(pod_id)
+                stopped = True
+                self.log(f"Bestands-Pod {pod_id} datenerhaltend pausiert (keine GPU-Kosten, "
+                         "Volume bleibt erhalten).", level="WARNING")
+            except Exception as se:
+                self.log(f"Bestands-Pod {pod_id} konnte nicht pausiert werden: {se}", level="ERROR")
+            hint = (f"Preflight fehlgeschlagen ({err.component}), Bestands-Pod bleibt erhalten"
+                    f"{' und ist pausiert' if stopped else ''}: {detail} "
+                    "Pod ggf. später erneut aufwecken oder manuell prüfen.")
+            with self.lock:
+                if operation_id != self._operation_id or self.pod_id != pod_id:
+                    return
+                self.status = "STOPPED" if stopped else "ERROR"
+                if stopped:
+                    self._book_session_cost()
+                    self.session_start_time = None
+                    self.hourly_rate = None
+                    self._hourly_rate_pod_id = None
+                self.status_detail = hint
+                self.startup_progress.update(phase="error", label="Preflight – fehlgeschlagen",
+                                             detail=hint[-500:], active=False, updated_at=time.time())
+                update_config({"active_pod_status": self.status})
+            self.log(hint, level="ERROR")
+            return
+
+        if pod_id:
+            try:
+                client.terminate_pod(pod_id)
+                self.log(f"Defekten Pod {pod_id} automatisch terminiert - keine weiteren Kosten.", level="WARNING")
+            except Exception as te:
+                # Ohne Terminieren läuft der Pod weiter; dann den Nutzer
+                # entscheiden lassen statt blind neu zu buchen (Doppelkosten).
+                self.log(f"Pod {pod_id} konnte NICHT automatisch terminiert werden: {te}", level="ERROR")
+                with self.lock:
+                    if operation_id != self._operation_id:
+                        return
+                    self.status = "ERROR"
+                    self.status_detail = ("Preflight fehlgeschlagen und Pod konnte nicht automatisch "
+                                          "gelöscht werden - bitte in RunPod prüfen.")
+                    self.startup_progress.update(phase="error", label="Preflight – fehlgeschlagen",
+                                                 detail=self.status_detail, active=False, updated_at=time.time())
+                    update_config({"active_pod_status": "ERROR"})
+                return
+            with self.lock:
+                if operation_id != self._operation_id:
+                    return
+                self.pod_id = None
+                self.pod_ip = None
+                self.pod_ssh_port = None
+                self.proxy_url = None
+            update_config({"active_pod_id": None})
+
+        self._preflight_retries = getattr(self, "_preflight_retries", 0) + 1
+        max_retries = int(load_config().get("preflight_max_retries", 2))
+        if self._preflight_retries > max_retries:
+            hint = (f"{self._preflight_retries - 1} Pods nacheinander mit defekter Hardware oder "
+                    "Netzwerk. Tipp: Secure Cloud in den Einstellungen wählen (zuverlässige Hosts, "
+                    "etwas teurer) oder später erneut versuchen.")
+            self.log(hint, level="ERROR")
+            with self.lock:
+                if operation_id != self._operation_id:
+                    return
+                self.status = "ERROR"
+                self.status_detail = hint
+                self.startup_progress.update(phase="error", label="Preflight – fehlgeschlagen",
+                                             detail=hint, active=False, updated_at=time.time())
+                update_config({"active_pod_id": None, "active_pod_status": "ERROR"})
+            return
+
+        attempt = self._preflight_retries
+        with self.lock:
+            if operation_id != self._operation_id:
+                return
+            self.status_detail = f"Host defekt ({err.component}) - buche neu (Versuch {attempt + 1})..."
+            self.startup_progress.update(phase="booking", label=f"Neuer Buchungsversuch ({attempt + 1})",
+                                         detail=detail, active=True, updated_at=time.time())
+            update_config({"active_pod_status": "STARTING"})
+        self.log(f"Buche Ersatz-Pod (Versuch {attempt + 1} von {max_retries + 1})...", level="WARNING")
+        self._deploy_or_resume_worker(operation_id)
 
     def _deploy_or_resume_worker(self, operation_id=None):
         if operation_id is None:
@@ -442,30 +656,85 @@ class PodOrchestrator:
                 return
             if already_running:
                 self.log(f"Pod {pod_id} existiert und läuft bereits. Verwende ihn weiter...")
+                with self.lock:
+                    # Bestands-Pod: Preflight-Fehler dürfen ihn nie terminieren.
+                    self._fresh_pod_op_id = None
             elif can_resume:
                 self.log(f"Reaktiviere bestehenden Pod {pod_id}...")
                 client.resume_pod(pod_id)
+                with self.lock:
+                    self._fresh_pod_op_id = None
             else:
                 gpu_type = cfg.get("gpu_type_id", "NVIDIA A40")
                 cloud_type = cfg.get("cloud_type", "ALL")
                 vol_gb = int(cfg.get("volume_disk_gb", 75))
                 cont_gb = int(cfg.get("container_disk_gb", 30))
 
-                self.log(f"Erstelle neuen Pod auf RunPod mit GPU '{gpu_type}' (Volume: {vol_gb} GB)...")
-                pod_id = client.deploy_pod(
-                    name="wan2gp-videogen-studio",
-                    gpu_type_id=gpu_type,
-                    volume_in_gb=vol_gb,
-                    container_disk_in_gb=cont_gb,
-                    cloud_type=cloud_type,
-                    public_ssh_key=pub_key
-                )
-                with self.lock:
-                    if operation_id != self._operation_id:
+                # RunPod stellt keinen Bestand bereit - der Buchungsversuch ist
+                # die einzige Pruefung. Bei "ausgebucht" automatisch die naechste
+                # guenstige Karte versuchen, statt den Start fehlschlagen zu lassen.
+                candidates = [gpu_type]
+                seen = {gpu_type}
+                try:
+                    unavailable = self.get_gpu_availability()
+                    others = [g for g in client.get_gpu_types()
+                              if g.get("memoryInGb", 0) >= 24 and g["id"] not in seen
+                              and g["id"] not in unavailable]
+                    others.sort(key=lambda g: g.get("communityPrice") if g.get("communityPrice") is not None else 99)
+                    for g in others[:2]:
+                        candidates.append(g["id"])
+                        seen.add(g["id"])
+                except Exception as e:
+                    self.log(f"GPU-Liste fuer Ausweichkandidaten nicht abrufbar ({type(e).__name__}).", level="WARNING")
+
+                deployed = False
+                last_err: Optional[Exception] = None
+                for cand in candidates:
+                    if not self._operation_current(operation_id):
                         return
-                    self.pod_id = pod_id
-                    update_config({"active_pod_id": pod_id, "active_pod_status": "STARTING"})
-                self.log(f"Pod erfolgreich gebucht! Pod-ID: {pod_id}")
+                    if cand != gpu_type:
+                        self.log(f"GPU '{gpu_type}' ist ausgebucht - weiche automatisch aus auf '{cand}'...", level="WARNING")
+                    try:
+                        self.log(f"Erstelle neuen Pod auf RunPod mit GPU '{cand}' (Volume: {vol_gb} GB)...")
+                        new_pod_id = client.deploy_pod(
+                            name="wan2gp-videogen-studio",
+                            gpu_type_id=cand,
+                            volume_in_gb=vol_gb,
+                            container_disk_in_gb=cont_gb,
+                            cloud_type=cloud_type,
+                            public_ssh_key=pub_key
+                        )
+                        with self.lock:
+                            if operation_id != self._operation_id:
+                                # P1: Die Buchung lief durch, die Operation wurde
+                                # inzwischen ersetzt. Der neue Pod gehört niemandem
+                                # mehr und würde unbemerkt Kosten erzeugen - jetzt
+                                # gezielt aufräumen, den aktuelleren Zustand nicht
+                                # anfassen.
+                                stale_pod_id = new_pod_id
+                            else:
+                                stale_pod_id = None
+                                self.pod_id = new_pod_id
+                                # Frisch gebucht: Nur solche Pods darf der Preflight
+                                # automatisch verwerfen und ersetzen.
+                                self._fresh_pod_op_id = operation_id
+                        if stale_pod_id:
+                            self._cleanup_orphan_pod(client, stale_pod_id)
+                            return
+                        pod_id = new_pod_id
+                        update_config({"active_pod_id": pod_id, "active_pod_status": "STARTING",
+                                       "gpu_type_id": cand})
+                        self.log(f"Pod erfolgreich gebucht! Pod-ID: {pod_id} (GPU: {cand})")
+                        deployed = True
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if self.is_out_of_stock_error(str(e)):
+                            self.mark_gpu_unavailable(cand)
+                            continue
+                        raise
+                if not deployed:
+                    raise last_err or Exception("Keine GPU konnte gebucht werden.")
 
             if not self._operation_current(operation_id, pod_id):
                 return
@@ -506,7 +775,9 @@ class PodOrchestrator:
                 time.sleep(5)
 
             if not ip or not ssh_port:
-                raise Exception("Timeout beim Warten auf öffentliche IP / SSH-Port des Containers.")
+                raise PodPreflightError(
+                    "ssh", "Timeout beim Warten auf öffentliche IP / SSH-Port des Containers "
+                           "(Host startet den Container nicht).")
 
             with self.lock:
                 if operation_id != self._operation_id or self.pod_id != pod_id:
@@ -549,6 +820,10 @@ class PodOrchestrator:
                 update_config({"active_pod_status": "RUNNING"})
             self.log(f"Wan2GP erfolgreich gestartet! Bereit unter {self.proxy_url}")
 
+        except PodPreflightError as e:
+            if not self._operation_current(operation_id):
+                return
+            self._handle_preflight_failure(operation_id, e)
         except Exception as e:
             if not self._operation_current(operation_id):
                 return
@@ -697,7 +972,8 @@ class PodOrchestrator:
                 time.sleep(5)
 
         if not connected:
-            raise Exception("Konnte keine SSH-Verbindung zum Pod herstellen.")
+            raise PodPreflightError("ssh", "Konnte keine SSH-Verbindung zum Pod herstellen "
+                                           "(SSH-Daemon im Container antwortet nicht).")
         if cancelled():
             return False
         self._set_startup_progress("ssh", "GPU-Zugriff wird geprüft",
@@ -711,8 +987,27 @@ class PodOrchestrator:
             detail = (cuda_err.strip() or cuda_out.strip() or "CUDA-Prüfung ohne Rückmeldung fehlgeschlagen.")[-500:]
             self._set_startup_progress("ssh", "GPU-Zugriff prüfen", detail, operation_id)
             self.log(f"CUDA-Prüfung fehlgeschlagen: {detail}", level="ERROR")
-            return False
+            raise PodPreflightError("cuda", detail)
         self.log(cuda_out.strip() or "CUDA-Prüfung erfolgreich.")
+
+        # Hosts mit lahmer/toter Leitung früh aussortieren: Die Modell-Downloads
+        # sind 30+ GB; ein 100-KB/s-Host würde stundenlang Geld verbrennen.
+        min_net_mb = float(load_config().get("preflight_min_net_speed_mb", 5) or 0)
+        if min_net_mb > 0:
+            self._set_startup_progress("ssh", "Netzwerk-Geschwindigkeit wird geprüft",
+                                       "Teste Download-Rate zu HuggingFace für die Modell-Downloads.", operation_id)
+            if cancelled():
+                return False
+            net_speed = self._preflight_network_speed(ssh)
+            if net_speed is not None and net_speed < min_net_mb * 1_000_000:
+                detail = (f"Download-Rate zu HuggingFace nur {net_speed / 1e6:.2f} MB/s "
+                          f"(Minimum {min_net_mb:.0f} MB/s) - Host-Netzwerk zu langsam für Modell-Downloads.")
+                self._set_startup_progress("ssh", "Netzwerk prüfen", detail, operation_id)
+                self.log(f"Netzwerk-Preflight fehlgeschlagen: {detail}", level="ERROR")
+                raise PodPreflightError("network", detail)
+            if net_speed is not None:
+                self.log(f"Netzwerk-Preflight ok: {net_speed / 1e6:.1f} MB/s zu HuggingFace.")
+
         self._set_startup_progress("install", "WanGP und Pakete werden installiert",
                                    "Installation wird im Pod gestartet.", operation_id)
 
@@ -891,8 +1186,37 @@ except Exception as e:
         self._log_wan2gp_tail(ssh)
         return False
 
+    def _kick_video_sync(self):
+        """Startet den Video-Sync als eigenen Daemon-Thread.
+
+        Ein hängender SFTP-Transfer darf den Kostenschutz im Hintergrund-Loop
+        (Auto-Shutdown, Kostenaktualisierung) nie blockieren. Der Sync läuft
+        maximal einmal gleichzeitig, damit es keinen Thread-Stau gibt."""
+        with self.lock:
+            if self._sync_in_progress:
+                return
+            ip, port = self.pod_ip, self.pod_ssh_port
+            if not ip or not port:
+                return
+            self._sync_in_progress = True
+
+        def run():
+            try:
+                ssh = SSHManager(ip, port, log_callback=self.log)
+                new_vids = ssh.sync_videos()
+                if new_vids:
+                    self.last_activity_time = time.time()
+                    self.log(f"Neu synchronisierte Videos: {', '.join(new_vids)}")
+            except Exception as e:
+                self.log(f"Video-Sync fehlgeschlagen ({type(e).__name__}): {e}", level="WARNING")
+            finally:
+                with self.lock:
+                    self._sync_in_progress = False
+
+        threading.Thread(target=run, daemon=True, name="video-sync").start()
+
     def _background_loop(self):
-        """Monitors session cost, auto-shutdown timer and syncs videos."""
+        """Monitors session cost, auto-shutdown timer and kicks video syncs."""
         sync_counter = 0
         last_rate_poll = 0
         while not self._stop_bg_thread:
@@ -910,6 +1234,22 @@ except Exception as e:
                     try:
                         pod = self.get_client().get_pod(pod_id)
                         if pod:
+                            # ERROR beschreibt die Anwendung, nicht den Cloud-
+                            # Zustand. Ein nachweislich pausierter Pod darf nie
+                            # allein wegen eines alten Idle-Timers gelöscht werden.
+                            if pod.get("desiredStatus") == "EXITED":
+                                with self.lock:
+                                    if operation_id != self._operation_id or pod_id != self.pod_id:
+                                        continue
+                                    self.status = "STOPPED"
+                                    self._book_session_cost()
+                                    self.session_start_time = None
+                                    self.hourly_rate = None
+                                    self._hourly_rate_pod_id = None
+                                    self.status_detail = (f"Pod pausiert (Speicher erhalten). {self.status_detail}"
+                                                          if status == "ERROR" else "Pod pausiert (Speicher erhalten)")
+                                    update_config({"active_pod_status": "STOPPED"})
+                                continue
                             self._refresh_pod_rate(pod_id, pod, operation_id)
                     except Exception as e:
                         # Pricing is advisory; its API must not block the idle
@@ -918,22 +1258,26 @@ except Exception as e:
                 if not self._operation_current(operation_id, pod_id):
                     continue
 
-                if status != "RUNNING":
+                if status not in ("RUNNING", "ERROR"):
                     continue
 
                 # Update live cost
-                with self.lock:
-                    if self.session_start_time and self.hourly_rate is not None:
-                        elapsed_hours = (now - self.session_start_time) / 3600.0
-                        self.accumulated_cost = elapsed_hours * self.hourly_rate
+                if status == "RUNNING":
+                    with self.lock:
+                        if self.session_start_time and self.hourly_rate is not None:
+                            elapsed_hours = (now - self.session_start_time) / 3600.0
+                            self.accumulated_cost = elapsed_hours * self.hourly_rate
 
-                # Auto-Shutdown Check
+                # Auto-Shutdown Check - auch für ERROR-Pods: Der lokale Fehlerstatus
+                # sagt nichts darüber, ob der Pod bei RunPod noch läuft und Kosten
+                # macht. (Laufende Installationen sind über last_activity_time
+                # geschützt, das der Bootstrap-Fortschritt aktuell hält.)
                 try:
                     auto_shut = int(cfg.get("auto_shutdown_minutes", 30) or 0)
                 except (ValueError, TypeError):
                     auto_shut = 30
 
-                if auto_shut > 0:
+                if auto_shut > 0 and pod_id:
                     idle_seconds = now - self.last_activity_time
                     if idle_seconds > (auto_shut * 60):
                         if cfg.get("standby_mode", "stop") == "terminate":
@@ -943,24 +1287,18 @@ except Exception as e:
                             self.log(f"Auto-Shutdown: {auto_shut} Minuten Inaktivität erreicht! Pausiere GPU (Stop Pod)...", level="WARNING")
                             self.stop_pod()
 
-                # Sync Videos every ~15 seconds
-                sync_counter += 2
-                try:
-                    sync_interval = int(cfg.get("sync_interval_seconds", 15) or 15)
-                except (ValueError, TypeError):
-                    sync_interval = 15
+                # Sync Videos every ~15 seconds (eigener Thread, blockiert nie
+                # den Kostenschutz oben)
+                if status == "RUNNING":
+                    sync_counter += 2
+                    try:
+                        sync_interval = int(cfg.get("sync_interval_seconds", 15) or 15)
+                    except (ValueError, TypeError):
+                        sync_interval = 15
 
-                if sync_counter >= sync_interval and cfg.get("auto_sync_videos", True):
-                    sync_counter = 0
-                    if self.pod_ip and self.pod_ssh_port:
-                        try:
-                            ssh = SSHManager(self.pod_ip, self.pod_ssh_port, log_callback=self.log)
-                            new_vids = ssh.sync_videos()
-                            if new_vids:
-                                self.last_activity_time = now
-                                self.log(f"Neu synchronisierte Videos: {', '.join(new_vids)}")
-                        except Exception as e:
-                            pass
+                    if sync_counter >= sync_interval and cfg.get("auto_sync_videos", True):
+                        sync_counter = 0
+                        self._kick_video_sync()
             except Exception as e:
                 self.log(f"Hintergrund-Dienst Fehler (wird abgefangen): {e}", level="ERROR")
                 time.sleep(5)
@@ -992,15 +1330,18 @@ except Exception as e:
             }
 
     def delete_video(self, filename: str) -> bool:
-        """Deletes a video file locally and remotely on the pod (if running) to prevent re-sync."""
+        """Delete locally; delete remotely only with matching content provenance.
+
+        Legacy name maps and equal file sizes cannot establish identity. Require
+        a verified download plus the current remote SHA256 before removing it.
+        """
         safe_name = os.path.basename(filename)
         deleted_anything = False
-        # Falls der Name beim Download für Windows angepasst wurde, heißt die Datei
-        # auf dem Pod noch Original -> Mapping nutzen, sonst bleibt sie remote liegen.
-        original_name = load_name_map().get(safe_name, safe_name)
-
-        # 1. Delete locally
         local_path = os.path.join(get_outputs_dir(), safe_name)
+        identity = get_verified_identity(safe_name, local_path)
+        with self.lock:
+            ip, port, status = self.pod_ip, self.pod_ssh_port, self.status
+
         if os.path.exists(local_path):
             try:
                 os.remove(local_path)
@@ -1008,23 +1349,24 @@ except Exception as e:
                 self.log(f"Video lokal gelöscht: {safe_name}")
             except Exception as e:
                 self.log(f"Fehler beim lokalen Löschen von {safe_name}: {e}", level="WARNING")
-
-        # Mapping-Eintrag mit aufräumen, sobald die lokale Datei weg ist
-        if original_name != safe_name and not os.path.exists(local_path):
-            mapping = load_name_map()
-            if mapping.pop(safe_name, None) is not None:
-                save_name_map(mapping)
-
-        # 2. Delete remotely if pod is running
-        if self.pod_ip and self.pod_ssh_port and self.status == "RUNNING":
+                return False
+        if not os.path.exists(local_path):
             try:
-                ssh = SSHManager(self.pod_ip, self.pod_ssh_port)
-                remote_escaped = shlex.quote(f"/workspace/Wan2GP/outputs/{original_name}")
-                code, _, _ = ssh.exec_command(f"rm -f {remote_escaped}")
-                if code == 0:
-                    deleted_anything = True
-                self.log(f"Video auch auf dem Pod gelöscht: {original_name}")
+                remove_name_mapping(safe_name)
+            except OSError as e:
+                self.log(f"Video gelöscht, Zuordnung konnte nicht bereinigt werden: {e}", level="WARNING")
+
+        if deleted_anything and identity and ip and port and status == "RUNNING":
+            original_name = identity["remote"]
+            try:
+                ssh = SSHManager(ip, port, log_callback=self.log)
+                if ssh.delete_verified_file(f"/workspace/Wan2GP/outputs/{original_name}", identity["sha256"]):
+                    self.log(f"Video auch auf dem Pod gelöscht: {original_name}")
+                else:
+                    self.log(f"Remote-Inhalt von '{original_name}' ist nicht bestätigt oder wurde verändert; "
+                             "Datei auf dem Pod bleibt erhalten.", level="WARNING")
             except Exception as e:
                 self.log(f"Hinweis: Konnte Video auf Pod nicht löschen: {e}", level="WARNING")
-
+        elif deleted_anything and not identity:
+            self.log(f"Keine verifizierte Remote-Zuordnung für '{safe_name}'; nur lokal gelöscht.", level="WARNING")
         return deleted_anything

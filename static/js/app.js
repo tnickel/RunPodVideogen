@@ -189,6 +189,28 @@ document.addEventListener("DOMContentLoaded", () => {
   let timerInterval = null;
   let activeProxyUrl = null;
   let currentBalance = 0;
+  let balanceInputDirty = false;
+  let balanceInputBaseline = "";
+  let settingsSaving = false;
+
+  function syncBalanceInput() {
+    if (balanceInputDirty) return;
+    balanceInputBaseline = currentBalance.toFixed(2);
+    cfgBalance.value = balanceInputBaseline;
+  }
+
+  function resetBalanceInput() {
+    balanceInputDirty = false;
+    syncBalanceInput();
+  }
+
+  // Focus is not an edit. Keep an explicit edit until save or cancel, including
+  // when the user moves to another field while status polls keep arriving.
+  const markBalanceEdited = () => {
+    balanceInputDirty = cfgBalance.value !== balanceInputBaseline;
+  };
+  cfgBalance.addEventListener("input", markBalanceEdited);
+  cfgBalance.addEventListener("change", markBalanceEdited);
 
   // Format Seconds to HH:MM:SS
   function formatTime(seconds) {
@@ -249,7 +271,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (data.account.balance !== undefined) {
           currentBalance = parseFloat(data.account.balance);
           displayBalance.textContent = currentBalance.toFixed(2);
-          cfgBalance.value = currentBalance.toFixed(2);
+          syncBalanceInput();
         }
       }
 
@@ -799,6 +821,18 @@ document.addEventListener("DOMContentLoaded", () => {
         const delBtn = card.querySelector(".video-delete-btn");
         let delTimeout = null;
 
+        // Vollständiger Reset des Bestätigungszustands: Klasse, Beschriftung,
+        // Titel, Aktivierung UND Timer. Ein halber Reset ließ 'confirming'
+        // stehen - dann baute die Galerie nie wieder neu auf und der nächste
+        // Klick löschte ohne sichtbare Bestätigung.
+        const resetDeleteBtn = () => {
+          if (delTimeout) { clearTimeout(delTimeout); delTimeout = null; }
+          delBtn.classList.remove("confirming");
+          delBtn.innerHTML = "&times;";
+          delBtn.title = "Video löschen";
+          delBtn.disabled = false;
+        };
+
         delBtn.addEventListener("click", async (e) => {
           e.stopPropagation();
           e.preventDefault();
@@ -809,16 +843,12 @@ document.addEventListener("DOMContentLoaded", () => {
             delBtn.innerHTML = "<span>Löschen?</span>";
             delBtn.title = "Klicke noch einmal, um endgültig zu löschen";
 
-            delTimeout = setTimeout(() => {
-              delBtn.classList.remove("confirming");
-              delBtn.innerHTML = "&times;";
-              delBtn.title = "Video löschen";
-            }, 3500);
+            delTimeout = setTimeout(resetDeleteBtn, 3500);
             return;
           }
 
           // Step 2: User clicked second time -> Execute deletion
-          clearTimeout(delTimeout);
+          if (delTimeout) { clearTimeout(delTimeout); delTimeout = null; }
           delBtn.disabled = true;
           delBtn.innerHTML = '<span class="del-spinner"></span>';
 
@@ -839,15 +869,13 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
               }, 300);
             } else {
-              const errData = await delRes.json();
+              const errData = await delRes.json().catch(() => ({}));
               alert("Fehler beim Löschen: " + (errData.detail || "Unbekannter Fehler"));
-              delBtn.disabled = false;
-              delBtn.innerHTML = "&times;";
+              resetDeleteBtn();
             }
           } catch (delErr) {
             alert("Netzwerkfehler beim Löschen: " + delErr);
-            delBtn.disabled = false;
-            delBtn.innerHTML = "&times;";
+            resetDeleteBtn();
           }
         });
 
@@ -883,20 +911,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (modalDeleteBtn) {
     let modalDelTimeout = null;
+
+    const resetModalDeleteBtn = () => {
+      if (modalDelTimeout) { clearTimeout(modalDelTimeout); modalDelTimeout = null; }
+      modalDeleteBtn.classList.remove("confirming");
+      modalDeleteBtn.innerHTML = "<span>🗑️ Löschen</span>";
+      modalDeleteBtn.disabled = false;
+    };
+
     modalDeleteBtn.addEventListener("click", async () => {
       if (!currentModalFilename) return;
 
       if (!modalDeleteBtn.classList.contains("confirming")) {
         modalDeleteBtn.classList.add("confirming");
         modalDeleteBtn.innerHTML = "<span>⚠️ Wirklich löschen?</span>";
-        modalDelTimeout = setTimeout(() => {
-          modalDeleteBtn.classList.remove("confirming");
-          modalDeleteBtn.innerHTML = "<span>🗑️ Löschen</span>";
-        }, 3500);
+        modalDelTimeout = setTimeout(resetModalDeleteBtn, 3500);
         return;
       }
 
-      clearTimeout(modalDelTimeout);
+      if (modalDelTimeout) { clearTimeout(modalDelTimeout); modalDelTimeout = null; }
       modalDeleteBtn.disabled = true;
       modalDeleteBtn.innerHTML = "<span>Lösche...</span>";
 
@@ -911,13 +944,11 @@ document.addEventListener("DOMContentLoaded", () => {
           fetchVideos();
         } else {
           alert("Fehler beim Löschen des Videos.");
-          modalDeleteBtn.disabled = false;
-          modalDeleteBtn.innerHTML = "<span>🗑️ Löschen</span>";
+          resetModalDeleteBtn();
         }
       } catch (err) {
         alert("Netzwerkfehler: " + err);
-        modalDeleteBtn.disabled = false;
-        modalDeleteBtn.innerHTML = "<span>🗑️ Löschen</span>";
+        resetModalDeleteBtn();
       }
     });
   }
@@ -1024,7 +1055,7 @@ document.addEventListener("DOMContentLoaded", () => {
           if (data.account && data.account.balance !== undefined) {
             currentBalance = parseFloat(data.account.balance);
             displayBalance.textContent = currentBalance.toFixed(2);
-            if (cfgBalance) cfgBalance.value = currentBalance.toFixed(2);
+            syncBalanceInput();
             if (currentHourlyRate > 0) {
               const hours = (currentBalance / currentHourlyRate).toFixed(0);
               cockpitRunTimeRemaining.textContent = `~${hours}h GPU möglich`;
@@ -1105,6 +1136,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Settings Modal
   openSettingsBtn.addEventListener("click", async () => {
+    resetBalanceInput();
     try {
       const res = await fetch("/api/config");
       if (res.ok) {
@@ -1112,33 +1144,74 @@ document.addEventListener("DOMContentLoaded", () => {
         cfgApiKey.value = cfg.runpod_api_key_masked || "";
         cfgApiKey.placeholder = "Neuen Key nur eingeben, wenn er geändert werden soll";
         cfgEmail.value = cfg.account_email || "";
-        cfgBalance.value = (cfg.account_balance !== undefined ? cfg.account_balance : currentBalance).toFixed(2);
       }
     } catch (_) {}
     settingsModal.classList.add("active");
   });
 
-  function closeSettings() {
+  function closeSettings({ force = false } = {}) {
+    if (settingsSaving && !force) return;
     settingsModal.classList.remove("active");
+    resetBalanceInput();
   }
 
   closeSettingsBtn.addEventListener("click", closeSettings);
   cancelSettingsBtn.addEventListener("click", closeSettings);
 
   saveSettingsBtn.addEventListener("click", async () => {
+    if (settingsSaving) return;
     const key = cfgApiKey.value.trim();
-    const bal = parseFloat(cfgBalance.value);
-    const body = { account_balance: isNaN(bal) ? currentBalance : bal };
+    const balanceText = cfgBalance.value.trim();
+    const bal = Number(balanceText);
+    if (balanceInputDirty && (!balanceText || !Number.isFinite(bal) || bal < 0)) {
+      alert("Bitte einen gültigen, nicht negativen Kontostand eingeben.");
+      return;
+    }
+    const correctBalance = balanceInputDirty && Math.abs(bal - currentBalance) > 0.004;
+
+    const body = {};
     if (key && !key.includes("...")) {
       body.runpod_api_key = key;
     }
-    await fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    closeSettings();
-    fetchStatus();
+    settingsSaving = true;
+    saveSettingsBtn.disabled = true;
+    cfgBalance.disabled = true;
+    cfgApiKey.disabled = true;
+    try {
+      const res = await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        throw new Error(error.detail || "Einstellungen konnten nicht gespeichert werden.");
+      }
+      // An untouched field must never become a balance correction just because
+      // the live costs changed since the dialog was opened.
+      if (correctBalance) {
+        const correction = await fetch(`/api/account/refresh?set_balance=${encodeURIComponent(bal)}`);
+        const data = await correction.json().catch(() => ({}));
+        if (!correction.ok) {
+          throw new Error(data.detail || "Kontostand konnte nicht korrigiert werden.");
+        }
+        const confirmedBalance = data.account && data.account.balance;
+        if (typeof confirmedBalance !== "number" || !Number.isFinite(confirmedBalance) || confirmedBalance < 0) {
+          throw new Error("Die Guthabenkorrektur wurde nicht mit einem gültigen Kontostand bestätigt.");
+        }
+        currentBalance = confirmedBalance;
+        displayBalance.textContent = currentBalance.toFixed(2);
+      }
+      closeSettings({ force: true });
+      await fetchStatus();
+    } catch (err) {
+      alert("Fehler beim Speichern: " + err.message);
+    } finally {
+      settingsSaving = false;
+      saveSettingsBtn.disabled = false;
+      cfgBalance.disabled = false;
+      cfgApiKey.disabled = false;
+    }
   });
 
   // Terminal Logs

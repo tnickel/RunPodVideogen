@@ -106,7 +106,7 @@ def orch_env(tmp_path, monkeypatch):
 
     # Nur das Modul des Orchestrators ersetzen, nicht threading.Thread global.
     monkeypatch.setattr(orch, "threading", types.SimpleNamespace(
-        Lock=threading.Lock, Thread=tracked_thread))
+        Lock=threading.Lock, RLock=threading.RLock, Thread=tracked_thread))
 
     cfg_file = tmp_path / "config.json"
     outputs = tmp_path / "outputs"

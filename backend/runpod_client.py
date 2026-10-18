@@ -90,6 +90,14 @@ class RunPodClient:
     def __init__(self, api_key: str):
         self.api_key = api_key.strip() if api_key else ""
 
+    @staticmethod
+    def _sanitize(text: str, api_key: str) -> str:
+        """Entfernt den API-Key aus Fehlertexten (requests bettet die URL mit
+        ?api_key=... in HTTP- und Verbindungsfehler ein)."""
+        if api_key and api_key in text:
+            return text.replace(api_key, "***API-KEY***")
+        return text
+
     def _request(self, query: str, variables: Optional[Dict[str, Any]] = None, mutating: bool = False) -> Dict[str, Any]:
         if not self.api_key:
             raise ValueError("RunPod API Key ist nicht konfiguriert.")
@@ -104,13 +112,21 @@ class RunPodClient:
             payload["variables"] = variables
 
         session = _no_retry_session if mutating else _session
-        res = session.post(url, json=payload, headers=headers, timeout=25)
-        res.raise_for_status()
+        failure = None
+        try:
+            res = session.post(url, json=payload, headers=headers, timeout=25)
+            res.raise_for_status()
+        except requests.RequestException as e:
+            # Raise outside the handler: neither a cause nor an implicit context
+            # may retain requests' authenticated URL in a formatted traceback.
+            failure = type(e)(self._sanitize(str(e), self.api_key))
+        if failure is not None:
+            raise failure from None
         res_json = res.json()
 
         if "errors" in res_json and res_json["errors"]:
             msgs = [e.get("message", "Unknown GraphQL error") for e in res_json["errors"]]
-            raise Exception("RunPod API Fehler: " + ", ".join(msgs))
+            raise Exception(self._sanitize("RunPod API Fehler: " + ", ".join(msgs), self.api_key))
 
         return res_json.get("data", {})
 

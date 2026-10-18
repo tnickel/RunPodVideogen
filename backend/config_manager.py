@@ -11,6 +11,7 @@ DEFAULT_CONFIG = {
     "runpod_api_key": "",
     "account_email": "",
     "account_balance": 18.74,
+    "spent_total": 0.0,
     "active_pod_id": None,
     "active_pod_status": "OFFLINE",
     "gpu_type_id": "NVIDIA A40",
@@ -22,7 +23,9 @@ DEFAULT_CONFIG = {
     "server_port": 7880,
     "server_host": "127.0.0.1",
     "auto_sync_videos": True,
-    "sync_interval_seconds": 15
+    "sync_interval_seconds": 15,
+    "preflight_max_retries": 2,
+    "preflight_min_net_speed_mb": 5
 }
 
 def get_outputs_dir() -> str:

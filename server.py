@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import math
 import subprocess
 import urllib.parse
 from datetime import datetime, timezone
@@ -86,12 +87,16 @@ class VideoDeleteModel(BaseModel):
 # Routes
 @app.get("/api/status")
 def get_status():
-    state = orchestrator.get_state()
-    cfg = load_config()
+    # Session booking moves accumulated_cost into spent_total under this lock.
+    # Read both sides together so a stop cannot subtract the same cost twice.
+    with orchestrator.lock:
+        state = orchestrator.get_state()
+        cfg = load_config()
 
     base_balance = float(cfg.get("account_balance", DEFAULT_CONFIG.get("account_balance", 0.0)))
+    spent_total = float(cfg.get("spent_total", 0.0) or 0.0)
     accumulated = float(state.get("accumulated_cost", 0.0))
-    balance = max(0.0, round(base_balance - accumulated, 2))
+    balance = max(0.0, round(base_balance - spent_total - accumulated, 2))
 
     account_info = {
         "email": orchestrator.get_account_email(),
@@ -233,9 +238,10 @@ def open_folder():
 
 @app.get("/api/account/refresh")
 def refresh_account(set_balance: float | None = None):
+    if set_balance is not None and (not math.isfinite(set_balance) or set_balance < 0):
+        raise HTTPException(status_code=400, detail="Kontostand muss eine endliche, nicht negative Zahl sein.")
     cfg = load_config()
     client = orchestrator.get_client()
-    state = orchestrator.get_state()
     
     email = cfg.get("account_email", "")
     try:
@@ -246,13 +252,20 @@ def refresh_account(set_balance: float | None = None):
     except Exception:
         pass
 
-    if set_balance is not None:
-        update_config({"account_balance": round(set_balance, 2)})
-        balance = round(set_balance, 2)
-    else:
-        base_balance = float(cfg.get("account_balance", DEFAULT_CONFIG.get("account_balance", 0.0)))
-        accumulated = float(state.get("accumulated_cost", 0.0))
-        balance = max(0.0, round(base_balance - accumulated, 2))
+    # Network I/O above must not hold the lifecycle lock. Only after it has
+    # finished, read the current accounting state and persist the rebase as one
+    # transaction relative to stop/terminate and the background cost update.
+    with orchestrator.lock:
+        cfg = load_config()
+        spent_total = float(cfg.get("spent_total", 0.0) or 0.0)
+        accumulated = float(orchestrator.accumulated_cost or 0.0)
+        if set_balance is not None:
+            new_base = round(float(set_balance) + spent_total + accumulated, 4)
+            update_config({"account_balance": new_base})
+            balance = round(set_balance, 2)
+        else:
+            base_balance = float(cfg.get("account_balance", DEFAULT_CONFIG.get("account_balance", 0.0)))
+            balance = max(0.0, round(base_balance - spent_total - accumulated, 2))
 
     return {
         "success": True,
@@ -271,19 +284,27 @@ def delete_video_endpoint(model: VideoDeleteModel):
     return {"success": True, "filename": safe_name}
 
 
+def _masked_config(cfg: dict) -> dict:
+    """Zentrale Aufbereitung von Konfigurationsantworten: Der API-Key wird
+    vollständig entfernt und nur maskiert zurückgegeben (GET und POST gleich)."""
+    safe = {k: v for k, v in cfg.items() if k != "runpod_api_key"}
+    key = cfg.get("runpod_api_key", "")
+    safe["runpod_api_key_masked"] = key[:6] + "..." + key[-4:] if len(key) > 10 else ("***" if key else "")
+    return safe
+
+
 @app.get("/api/config")
 def get_config_endpoint():
-    cfg = load_config()
-    # Mask API key completely to prevent leaking cleartext secrets
-    key = cfg.get("runpod_api_key", "")
-    masked = key[:6] + "..." + key[-4:] if len(key) > 10 else ("***" if key else "")
-    safe = {k: v for k, v in cfg.items() if k != "runpod_api_key"}
-    safe["runpod_api_key_masked"] = masked
-    return safe
+    return _masked_config(load_config())
+
 
 @app.post("/api/config")
 def update_config_endpoint(model: ConfigUpdateModel):
     updates = {k: v for k, v in model.model_dump().items() if v is not None}
+    # Der Kontostand ist KEINE Einstellung: Routine-Saves dürfen das Guthaben
+    # nicht verändern (der Wert im Dialog ist ein berechneter Restbetrag).
+    # Manuelle Korrektur nur über /api/account/refresh?set_balance=...
+    updates.pop("account_balance", None)
     previous_cloud = load_config().get("cloud_type", "ALL").upper()
     updated = update_config(updates)
     if "cloud_type" in updates and updated["cloud_type"].upper() != previous_cloud:
@@ -291,7 +312,7 @@ def update_config_endpoint(model: ConfigUpdateModel):
         # settings save or a GPU list refresh must leave those marks intact.
         orchestrator.reset_gpu_availability()
     orchestrator.log(f"Einstellungen aktualisiert: {list(updates.keys())}")
-    return {"success": True, "config": updated}
+    return {"success": True, "config": _masked_config(updated)}
 
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):

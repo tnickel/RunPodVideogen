@@ -261,3 +261,60 @@ def test_invalid_prices_are_not_usable(price):
     offer = rpc.gpu_offer_details({"communityPrice": price}, "COMMUNITY")
     assert offer["hourly_price"] is None
     assert offer["price_source"] == "unknown"
+
+
+# ---------------------------------------------------------------- P1-6
+
+class _ExplodingSession:
+    """Simuliert requests-Ausnahmen, die die URL (inkl. ?api_key=...) enthalten."""
+
+    def __init__(self, exc_type):
+        self._exc_type = exc_type
+
+    def post(self, url, **kwargs):
+        raise self._exc_type(f"503 Server Error: Service Unavailable for url: {url}")
+
+
+@pytest.mark.parametrize("mutating", [False, True])
+def test_request_errors_never_contain_the_api_key(monkeypatch, mutating):
+    """P1-6: requests bettet die ?api_key=-URL in HTTP-Fehler ein. Die zentrale
+    Aufbereitung muss den Key aus ALLEN Ausnahmen entfernen (lesbar für Logs
+    und API-Antworten), ohne die Fehlerart zu verändern."""
+    import requests as requests_mod
+    key = "testkey_ABCDEFGHIJKLMNOP"
+    client = rpc.RunPodClient(key)
+    boom = _ExplodingSession(requests_mod.HTTPError)
+    monkeypatch.setattr(rpc, "_session", boom)
+    monkeypatch.setattr(rpc, "_no_retry_session", boom)
+
+    with pytest.raises(requests_mod.HTTPError) as exc_info:
+        client._request("query { myself { id } }", mutating=mutating)
+
+    assert key not in str(exc_info.value), "API-Key darf im Fehlertext nicht vorkommen"
+    assert "***API-KEY***" in str(exc_info.value), "Ursache muss erkennbar bleiben"
+    assert key not in "".join(traceback.format_exception(exc_info.value))
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+
+
+def test_request_connection_errors_are_sanitized_too(monkeypatch):
+    import requests as requests_mod
+    key = "testkey_ABCDEFGHIJKLMNOP"
+    client = rpc.RunPodClient(key)
+
+    class _TimeoutSession:
+        def post(self, url, **kwargs):
+            raise requests_mod.ConnectionError(
+                f"HTTPSConnectionPool(host='api.runpod.io', url={url}): Max retries exceeded")
+
+    monkeypatch.setattr(rpc, "_session", _TimeoutSession())
+    monkeypatch.setattr(rpc, "_no_retry_session", _TimeoutSession())
+
+    with pytest.raises(requests_mod.ConnectionError) as exc_info:
+        client._request("query { myself { id } }")
+
+    assert key not in str(exc_info.value)
+    assert "api.runpod.io" in str(exc_info.value), "Ursache muss erkennbar bleiben"
+    assert key not in "".join(traceback.format_exception(exc_info.value))
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None

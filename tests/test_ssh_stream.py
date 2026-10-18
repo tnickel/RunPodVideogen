@@ -4,6 +4,9 @@ from collections import deque
 from types import SimpleNamespace
 
 import pytest
+import paramiko
+import threading
+import time
 
 import backend.ssh_client as ssh_module
 from backend.ssh_client import SSHManager
@@ -242,3 +245,103 @@ def test_failed_connection_closes_allocated_ssh_client(monkeypatch):
         manager.exec_command_stream("test", timeout=2)
 
     assert client.closed == 1
+
+
+class _NoAckTransport:
+    """Real Paramiko Channel, but no network, worker or request ACK."""
+
+    def get_log_channel(self):
+        return "test.offline.channel"
+
+    def _send_user_message(self, message):
+        pass
+
+    def get_exception(self):
+        return None
+
+
+class _NoAckClient:
+    def __init__(self):
+        self.channel = paramiko.Channel(1)
+        self.channel._set_transport(_NoAckTransport())
+        self.channel.active = True
+        self.closed = False
+
+    def exec_command(self, command, timeout):
+        self.channel.settimeout(timeout)
+        # Paramiko ignores that channel timeout in this ACK wait. The deadline
+        # must close the connection/channel from the watchdog.
+        self.channel.exec_command(command)
+        return None, SimpleNamespace(channel=self.channel), None
+
+    def open_sftp(self):
+        self.channel.invoke_subsystem("sftp")
+        raise AssertionError("No subsystem ACK should arrive in this test")
+
+    def close(self):
+        self.closed = True
+        self.channel.close()
+
+
+def test_real_channel_missing_exec_ack_observes_deadline_without_worker_leak():
+    manager = object.__new__(SSHManager)
+    client = _NoAckClient()
+    manager.get_client = lambda **kwargs: client
+    before = {thread.ident for thread in threading.enumerate()}
+    start = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="exceeded"):
+        manager.exec_command_stream("never acknowledged", timeout=0.1)
+
+    assert time.monotonic() - start < 1.5
+    assert client.closed and client.channel.closed
+    assert {thread.ident for thread in threading.enumerate()} <= before
+
+
+def test_sftp_missing_subsystem_ack_is_bounded(monkeypatch, orch_env):
+    manager = object.__new__(SSHManager)
+    client = _NoAckClient()
+    manager.get_client = lambda **kwargs: client
+    manager.log_callback = lambda message: None
+    monkeypatch.setattr(ssh_module, "SFTP_IO_TIMEOUT_SECONDS", 0.1)
+    before = {thread.ident for thread in threading.enumerate()}
+    start = time.monotonic()
+
+    assert manager.sync_videos() == []
+
+    assert time.monotonic() - start < 1.5
+    assert client.closed and client.channel.closed
+    assert {thread.ident for thread in threading.enumerate()} <= before
+
+
+def test_sftp_download_deadline_aborts_blocked_receive_and_removes_partial(monkeypatch, orch_env):
+    manager = object.__new__(SSHManager)
+    client = _NoAckClient()
+    manager.get_client = lambda **kwargs: client
+    manager.log_callback = lambda message: None
+    monkeypatch.setattr(ssh_module, "SFTP_TRANSFER_TIMEOUT_SECONDS", 0.1)
+
+    class BlockingSFTP:
+        def get_channel(self):
+            return client.channel
+
+        def listdir_attr(self, remote):
+            return [SimpleNamespace(filename="blocked.mp4", st_size=10, st_mtime=time.time() - 60)]
+
+        def get(self, remote, local):
+            with open(local, "wb") as stream:
+                stream.write(b"partial")
+            # Actual Paramiko blocking buffered read, no fabricated sleep loop.
+            client.channel.recv(32_768)
+
+        def close(self):
+            pass
+
+    client.open_sftp = lambda: BlockingSFTP()
+    start = time.monotonic()
+
+    assert manager.sync_videos() == []
+
+    assert time.monotonic() - start < 1.5
+    assert client.closed and client.channel.closed
+    assert list(orch_env.outputs.iterdir()) == []

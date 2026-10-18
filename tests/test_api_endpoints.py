@@ -9,6 +9,9 @@
 
 import json
 import urllib.parse
+from types import SimpleNamespace
+
+import pytest
 
 import backend.config_manager as cm
 
@@ -40,20 +43,40 @@ def test_config_endpoint_masks_short_keys(client):
 
 # ------------------------------------------------------------------ P1-5
 
-def test_post_config_persists_balance(client, api_env):
-    """Regression: account_balance wurde früher von Pydantic still verworfen."""
-    res = client.post("/api/config", json={"account_balance": 42.5})
+def test_post_config_never_leaks_cleartext_api_key(client, api_env):
+    """P1-5: GET maskiert den Key - POST darf ihn genauso wenig ausliefern
+    (auch nicht bei leerem JSON oder einer gewöhnlichen Einstellungsänderung)."""
+    fake_key = "testkey_ABCDEFGHIJKLMNOP"
+    cm.update_config({"runpod_api_key": fake_key})
+
+    for payload in ({}, {"volume_disk_gb": 99}):
+        res = client.post("/api/config", json=payload)
+        assert res.status_code == 200
+        assert "runpod_api_key" not in res.json()["config"], "Klartext-Key-Feld darf nicht im JSON sein"
+        assert fake_key not in res.text, "Key darf nirgends in der POST-Antwort auftauchen"
+        assert res.json()["config"]["runpod_api_key_masked"] == "testke...MNOP"
+
+
+def test_post_config_never_touches_balance(client, api_env):
+    """P2-11: Das Speichern anderer Einstellungen darf das Guthaben nicht
+    verändern - der Wert im Dialog ist ein berechneter Restbetrag, kein neuer
+    Basisstand. Manuelle Korrektur nur über /api/account/refresh?set_balance."""
+    cm.update_config({"account_balance": 20.0, "spent_total": 5.0})
+
+    res = client.post("/api/config", json={"account_balance": 15.0, "volume_disk_gb": 80})
 
     assert res.status_code == 200
     on_disk = json.loads(api_env["cfg_file"].read_text(encoding="utf-8"))
-    assert on_disk["account_balance"] == 42.5
+    assert on_disk["account_balance"] == 20.0, "Basis darf durch Routine-Saves nicht verändert werden"
+    assert on_disk["spent_total"] == 5.0
+    assert on_disk["volume_disk_gb"] == 80
 
 
 def test_post_config_without_key_preserves_existing_key(client, api_env):
     """Settings-Speichern ohne neue Key-Eingabe darf den vorhandenen Key nicht löschen."""
     cm.update_config({"runpod_api_key": "testkey_SECRET123456"})
 
-    res = client.post("/api/config", json={"account_balance": 1.0})
+    res = client.post("/api/config", json={"volume_disk_gb": 30})
 
     assert res.status_code == 200
     on_disk = json.loads(api_env["cfg_file"].read_text(encoding="utf-8"))
@@ -76,6 +99,55 @@ def test_status_email_without_network(client):
     body = client.get("/api/status").json()
     assert "account" in body
     assert isinstance(body["account"]["email"], str)
+
+
+def test_balance_rebase_observes_session_booked_after_first_config_read(client, api_env, monkeypatch):
+    srv = api_env["server"]
+    cm.update_config({"account_balance": 20.0, "spent_total": 3.0})
+    srv.orchestrator.accumulated_cost = 2.0
+
+    def client_after_stop():
+        # Deterministic interleaving: stop books the session after the endpoint
+        # first reads its email/config, before it obtains an accounting snapshot.
+        with srv.orchestrator.lock:
+            srv.orchestrator._book_session_cost()
+        return SimpleNamespace(get_myself=lambda: {})
+
+    monkeypatch.setattr(srv.orchestrator, "get_client", client_after_stop)
+    response = client.get("/api/account/refresh", params={"set_balance": 15})
+
+    assert response.status_code == 200
+    assert response.json()["account"]["balance"] == 15
+    assert cm.load_config()["account_balance"] == 20
+    assert cm.load_config()["spent_total"] == 5
+    assert client.get("/api/status").json()["account"]["balance"] == 15
+
+
+def test_balance_rebase_reads_current_costs_after_account_request(client, api_env, monkeypatch):
+    srv = api_env["server"]
+    cm.update_config({"account_balance": 20.0, "spent_total": 3.0})
+    srv.orchestrator.accumulated_cost = 2.0
+
+    def slow_account_request():
+        with srv.orchestrator.lock:
+            srv.orchestrator.accumulated_cost = 4.0
+        return {}
+
+    monkeypatch.setattr(srv.orchestrator, "get_client", lambda: SimpleNamespace(get_myself=slow_account_request))
+    response = client.get("/api/account/refresh", params={"set_balance": 15})
+
+    assert response.status_code == 200
+    assert cm.load_config()["account_balance"] == 22
+    assert client.get("/api/status").json()["account"]["balance"] == 15
+
+
+@pytest.mark.parametrize("amount", ["nan", "inf", "-inf", "-1"])
+def test_balance_rebase_rejects_invalid_amount_before_network(client, api_env, monkeypatch, amount):
+    def unexpected_network():
+        raise AssertionError("Invalid balance must be rejected before creating a client")
+
+    monkeypatch.setattr(api_env["server"].orchestrator, "get_client", unexpected_network)
+    assert client.get("/api/account/refresh", params={"set_balance": amount}).status_code == 400
 
 
 # ------------------------------------------------------------------ P2-11b
